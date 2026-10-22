@@ -1,0 +1,292 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from PySide6.QtCore import QSize, Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QIcon
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPushButton,
+    QSplitter,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ..database import Database
+from ..library import LibraryService
+from .widgets import ImageStrip, ImageView, load_scaled_pixmap
+
+
+class LibraryPage(QWidget):
+    def __init__(
+        self,
+        database: Database,
+        library_service: LibraryService,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.database = database
+        self.library_service = library_service
+        self.current_work_id: int | None = None
+        self.current_assets: list[dict] = []
+        self._refreshing_tags = False
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(splitter)
+
+        left = QFrame()
+        left.setObjectName("Card")
+        left_layout = QVBoxLayout(left)
+        title = QLabel("本地作品库")
+        title.setStyleSheet("font-size:21px;font-weight:700;")
+        left_layout.addWidget(title)
+        search_row = QHBoxLayout()
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("搜索标题、提示词或标签")
+        apply_button = QPushButton("筛选")
+        search_row.addWidget(self.search_edit, 1)
+        search_row.addWidget(apply_button)
+        left_layout.addLayout(search_row)
+        left_layout.addWidget(QLabel("标签（勾选多个时需同时满足）"))
+        self.tag_list = QListWidget()
+        self.tag_list.setMaximumHeight(120)
+        left_layout.addWidget(self.tag_list)
+        self.work_list = QListWidget()
+        self.work_list.setObjectName("WorkList")
+        self.work_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.work_list.setIconSize(QSize(190, 190))
+        self.work_list.setGridSize(QSize(225, 245))
+        self.work_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.work_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        left_layout.addWidget(self.work_list, 1)
+
+        right = QFrame()
+        right.setObjectName("Card")
+        right_layout = QVBoxLayout(right)
+        top = QHBoxLayout()
+        self.detail_title = QLabel("选择一个作品")
+        self.detail_title.setStyleSheet("font-size:20px;font-weight:700;")
+        self.delete_button = QPushButton("删除作品")
+        self.delete_button.setObjectName("DangerButton")
+        top.addWidget(self.detail_title, 1)
+        top.addWidget(self.delete_button)
+        right_layout.addLayout(top)
+        self.meta_label = QLabel("")
+        self.meta_label.setStyleSheet("color:#637086;")
+        right_layout.addWidget(self.meta_label)
+        path_row = QHBoxLayout()
+        self.path_edit = QLineEdit()
+        self.path_edit.setReadOnly(True)
+        self.path_edit.setPlaceholderText("作品文件夹路径会显示在这里")
+        self.open_folder_button = QPushButton("打开作品文件夹")
+        path_row.addWidget(QLabel("保存位置"))
+        path_row.addWidget(self.path_edit, 1)
+        path_row.addWidget(self.open_folder_button)
+        right_layout.addLayout(path_row)
+        self.prompt_view = QTextEdit()
+        self.prompt_view.setReadOnly(True)
+        self.prompt_view.setMaximumHeight(145)
+        right_layout.addWidget(self.prompt_view)
+        tag_row = QHBoxLayout()
+        self.tags_edit = QLineEdit()
+        self.tags_edit.setPlaceholderText("标签用逗号分隔，例如：人像, 春天, 商业海报")
+        save_tags = QPushButton("保存标签")
+        tag_row.addWidget(QLabel("标签"))
+        tag_row.addWidget(self.tags_edit, 1)
+        tag_row.addWidget(save_tags)
+        right_layout.addLayout(tag_row)
+        self.asset_strip = ImageStrip(icon_size=78)
+        right_layout.addWidget(self.asset_strip)
+        self.preview = ImageView()
+        right_layout.addWidget(self.preview, 1)
+
+        splitter.addWidget(left)
+        splitter.addWidget(right)
+        splitter.setSizes([700, 700])
+
+        apply_button.clicked.connect(self.refresh)
+        self.search_edit.returnPressed.connect(self.refresh)
+        self.tag_list.itemChanged.connect(self._tags_changed)
+        self.work_list.itemSelectionChanged.connect(self._selection_changed)
+        self.asset_strip.currentRowChanged.connect(self._show_asset)
+        self.delete_button.clicked.connect(self._delete_current)
+        self.open_folder_button.clicked.connect(self._open_work_folder)
+        save_tags.clicked.connect(self._save_tags)
+        self.refresh()
+
+    def refresh(self) -> None:
+        checked_tags = self._checked_tags()
+        works = self.database.list_works(
+            search=self.search_edit.text(),
+            tags=checked_tags,
+        )
+        selected_id = self.current_work_id
+        self.work_list.blockSignals(True)
+        self.work_list.clear()
+        selected_item = None
+        for work in works:
+            item = QListWidgetItem(work["title"])
+            item.setData(Qt.ItemDataRole.UserRole, work)
+            cover = work.get("cover_path")
+            if cover and Path(cover).is_file():
+                pixmap = load_scaled_pixmap(cover, QSize(190, 190))
+                if not pixmap.isNull():
+                    item.setIcon(QIcon(pixmap))
+            item.setToolTip(work["title"])
+            self.work_list.addItem(item)
+            if work["id"] == selected_id:
+                selected_item = item
+        if selected_item:
+            selected_item.setSelected(True)
+        self.work_list.blockSignals(False)
+        self._refresh_tags()
+        self._selection_changed()
+
+    def _refresh_tags(self) -> None:
+        selected = set(self._checked_tags())
+        tags = self.database.list_tags()
+        existing = [self.tag_list.item(i).text() for i in range(self.tag_list.count())]
+        if existing == tags:
+            return
+        self._refreshing_tags = True
+        self.tag_list.clear()
+        for tag in tags:
+            item = QListWidgetItem(tag)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked if tag in selected else Qt.CheckState.Unchecked
+            )
+            self.tag_list.addItem(item)
+        self._refreshing_tags = False
+
+    def _checked_tags(self) -> list[str]:
+        tags: list[str] = []
+        for index in range(self.tag_list.count()):
+            item = self.tag_list.item(index)
+            if item.checkState() == Qt.CheckState.Checked:
+                tags.append(item.text())
+        return tags
+
+    def _tags_changed(self, _item: QListWidgetItem) -> None:
+        if not self._refreshing_tags:
+            self.refresh()
+
+    def _selection_changed(self) -> None:
+        selected = self.work_list.selectedItems()
+        if not selected:
+            self.current_work_id = None
+            self.detail_title.setText("选择一个作品")
+            self.meta_label.setText("作品详情、标签和保存位置会显示在这里。")
+            self.prompt_view.clear()
+            self.tags_edit.clear()
+            self.path_edit.clear()
+            self.asset_strip.clear()
+            self.preview.set_image(None)
+            self.preview.set_placeholder("作品详情会显示在这里")
+            self.delete_button.setEnabled(False)
+            self.open_folder_button.setEnabled(False)
+            return
+        work = selected[0].data(Qt.ItemDataRole.UserRole)
+        self.show_work(work["id"])
+
+    def show_work(self, work_id: int) -> None:
+        work = self.database.get_work(work_id)
+        if work is None:
+            return
+        self.current_work_id = work_id
+        self.detail_title.setText(work["title"])
+        params = self.library_service.work_parameters(work)
+        self.meta_label.setText(
+            f"{work['model']} · 宽高比 {params.get('aspect_ratio', '—')}"
+            f" · 分辨率 {params.get('resolution') or '自动'} · 数量 {params.get('n', '—')}"
+            f" · {work['created_at'].replace('T', ' ')[:16]}"
+        )
+        self.prompt_view.setPlainText(work["prompt"])
+        self.tags_edit.setText(", ".join(self.database.get_work_tags(work_id)))
+        self.delete_button.setEnabled(True)
+        try:
+            folder = self.library_service.work_folder(work_id)
+            self.path_edit.setText(str(folder))
+            self.path_edit.setCursorPosition(0)
+            self.path_edit.setToolTip(str(folder))
+            self.open_folder_button.setEnabled(folder.is_dir())
+        except ValueError:
+            self.path_edit.setText("作品文件夹不存在")
+            self.path_edit.setToolTip("")
+            self.open_folder_button.setEnabled(False)
+        self.current_assets = [
+            asset
+            for asset in self.database.get_work_assets(work_id)
+            if asset["role"] in ("result", "reference")
+        ]
+        items = []
+        result_number = 0
+        reference_number = 0
+        for asset in self.current_assets:
+            if asset["role"] == "result":
+                result_number += 1
+                label = f"结果 {result_number}"
+            else:
+                reference_number += 1
+                label = f"参考 {reference_number}"
+            items.append((Path(asset["path"]), label, asset))
+        self.asset_strip.set_images(items)
+        if self.current_assets:
+            self._show_asset(0)
+
+    def _show_asset(self, row: int) -> None:
+        if 0 <= row < len(self.current_assets):
+            self.preview.set_image(self.current_assets[row]["path"])
+
+    def _save_tags(self) -> None:
+        if self.current_work_id is None:
+            return
+        names = [name.strip() for name in self.tags_edit.text().split(",")]
+        self.database.set_work_tags(self.current_work_id, names)
+        self.refresh()
+
+    def _open_work_folder(self) -> None:
+        if self.current_work_id is None:
+            return
+        try:
+            folder = self.library_service.work_folder(self.current_work_id)
+        except ValueError as exc:
+            QMessageBox.warning(self, "无法打开", str(exc))
+            return
+        if not folder.is_dir():
+            QMessageBox.warning(self, "文件夹不存在", str(folder))
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
+            QMessageBox.warning(self, "无法打开", f"系统未能打开资源管理器：\n{folder}")
+
+    def _delete_current(self) -> None:
+        if self.current_work_id is None:
+            return
+        work = self.database.get_work(self.current_work_id)
+        if work is None:
+            return
+        answer = QMessageBox.warning(
+            self,
+            "删除作品",
+            f"确定删除作品“{work['title']}”吗？\n本地生成图、参考图和缩略图都会删除。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.library_service.delete_work(self.current_work_id)
+        except Exception as exc:
+            QMessageBox.warning(self, "删除失败", str(exc))
+            return
+        self.current_work_id = None
+        self.refresh()

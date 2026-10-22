@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+data/
+build/
+dist/
+*.log
+ui_preview*.png
+library_preview.png
+compare_preview.png
+settings_preview.png
+crop_preview.png
+history_preview.png
+exe_icon_extracted.png
+验收截图.png

@@ -11,6 +11,7 @@ from .constants import (
     DEFAULT_RESOLUTION,
     MAX_BATCH_SIZE,
     MAX_REFERENCE_IMAGES,
+    MODE_DRESS_UP,
     MODE_LABELS,
     MODE_REFERENCE,
     MODE_TEXT,
@@ -51,10 +52,12 @@ class ImageRequest:
             raise ValueError("不支持的宽高比")
         if self.resolution not in (None, "auto", *RESOLUTIONS[1:]):
             raise ValueError("不支持的分辨率")
-        if self.mode not in (MODE_TEXT, MODE_REFERENCE):
+        if self.mode not in (MODE_TEXT, MODE_REFERENCE, MODE_DRESS_UP):
             raise ValueError("不支持的生成模式")
         if len(self.reference_images) > MAX_REFERENCE_IMAGES:
             raise ValueError(f"参考图最多 {MAX_REFERENCE_IMAGES} 张")
+        if self.mode == MODE_DRESS_UP and len(self.reference_images) != 2:
+            raise ValueError("批量换装任务必须同时包含服装图和人物图")
         if self.mode == MODE_REFERENCE and not self.reference_images:
             raise ValueError("参考图编辑至少需要一张参考图")
         if self.mode == MODE_TEXT and self.reference_images:

@@ -26,6 +26,7 @@ from yixin.ui.crop import CropCanvas
 from yixin.ui.main_window import MainWindow
 from yixin.ui.theme import APP_STYLESHEET
 from yixin.ui.widgets import (
+    ImageView,
     ReferenceDropGroup,
     ReorderableImageStrip,
     load_scaled_pixmap,
@@ -369,6 +370,69 @@ class GuiFlowTests(unittest.TestCase):
             page.work_list.SelectionMode.SingleSelection,
         )
 
+    def test_library_uploads_multiple_images_as_independent_works(self) -> None:
+        first = make_image(
+            Path(self.temp.name) / "上传作品一.png",
+            (20, 60, 90),
+        )
+        second = make_image(
+            Path(self.temp.name) / "upload-work-two.png",
+            (90, 60, 20),
+        )
+        page = self.window.library_page
+        with patch(
+            "yixin.ui.library_page.QFileDialog.getOpenFileNames",
+            return_value=([str(first), str(second)], ""),
+        ):
+            page._upload_image_files()
+        self.app.processEvents()
+
+        self.assertEqual(page.work_list.count(), 2)
+        self.assertEqual(len(self.database.list_works()), 2)
+        self.assertEqual(page.detail_title.text(), "upload-work-two")
+        self.assertTrue(page.meta_label.text().startswith("手动上传"))
+        self.assertIn("没有生成提示词", page.prompt_view.placeholderText())
+        self.assertEqual(page.asset_strip.count(), 1)
+        folder = Path(page.path_edit.text())
+        self.assertTrue(folder.is_dir())
+        self.assertTrue(any(folder.glob("output.*")))
+        self.assertTrue((folder / "thumbnail.jpg").is_file())
+
+    def test_library_accepts_dragged_folder_recursively(self) -> None:
+        root = Path(self.temp.name) / "拖拽上传"
+        nested = root / "员工"
+        nested.mkdir(parents=True)
+        make_image(root / "2.png", (20, 80, 40))
+        make_image(nested / "1.png", (80, 20, 40))
+        (root / "ignore.txt").write_text("ignore", encoding="utf-8")
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(root))])
+        event = QDropEvent(
+            QPointF(10, 10),
+            Qt.DropAction.CopyAction,
+            mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        page = self.window.library_page
+        page.left_card.dropEvent(event)
+        self.app.processEvents()
+        self.assertEqual(page.work_list.count(), 2)
+        titles = [
+            page.work_list.item(index).text()
+            for index in range(page.work_list.count())
+        ]
+        self.assertEqual(titles, ["1", "2"])
+
+    def test_empty_image_view_uses_light_canvas(self) -> None:
+        view = ImageView()
+        view.resize(240, 180)
+        view.show()
+        self.app.processEvents()
+        image = view.grab().toImage()
+        self.assertEqual(image.pixelColor(2, 2).name(), "#eef2f7")
+        view.close()
+
     def test_local_save_buttons_export_selected_result(self) -> None:
         page = self.window.create_page
         page.mode_combo.setCurrentIndex(1)
@@ -386,7 +450,7 @@ class GuiFlowTests(unittest.TestCase):
         export_dir.mkdir()
         settings.set_local_save_mode("fixed")
         settings.set_fixed_folder(export_dir)
-        with patch("yixin.ui.create_page.show_saved_path") as saved_dialog:
+        with patch("yixin.ui.create_page.show_saved_toast") as saved_dialog:
             page._save_local_result()
         self.assertEqual(saved_dialog.call_count, 1)
         self.assertEqual(len(list(export_dir.iterdir())), 1)

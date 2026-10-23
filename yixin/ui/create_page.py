@@ -32,6 +32,7 @@ from ..constants import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_MODEL,
     DEFAULT_RESOLUTION,
+    MODE_DRESS_UP,
     MODE_LABELS,
     MODE_REFERENCE,
     MODE_TEXT,
@@ -55,7 +56,7 @@ from ..time_utils import format_task_elapsed
 from ..worker import TaskWorker
 from .dialogs import CompareDialog, LibraryPickerDialog, TemplateManagerDialog
 from .crop import CropDialog
-from .save_helpers import LocalSaveController, show_saved_path
+from .save_helpers import LocalSaveController, show_saved_path, show_saved_toast
 from .widgets import (
     CompareWidget,
     ImageStrip,
@@ -72,6 +73,7 @@ TASK_DATA_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 class CreatePage(QWidget):
     settings_requested = Signal()
     library_changed = Signal()
+    templates_changed = Signal()
 
     def __init__(
         self,
@@ -581,6 +583,10 @@ class CreatePage(QWidget):
                     break
         self.template_combo.blockSignals(False)
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.refresh_templates()
+
     def _apply_template(self) -> None:
         template = self.template_combo.currentData()
         if template:
@@ -600,6 +606,7 @@ class CreatePage(QWidget):
             QMessageBox.warning(self, "无法保存", str(exc))
             return
         self.refresh_templates()
+        self.templates_changed.emit()
 
     def _manage_templates(self) -> None:
         dialog = TemplateManagerDialog(
@@ -611,6 +618,8 @@ class CreatePage(QWidget):
         if dialog.selected_prompt:
             self.prompt_edit.setPlainText(dialog.selected_prompt)
         self.refresh_templates()
+        if dialog.templates_changed:
+            self.templates_changed.emit()
 
     def _enqueue_generation(self) -> None:
         if not self.secret_store.load():
@@ -733,6 +742,8 @@ class CreatePage(QWidget):
         if model_index >= 0:
             self.model_combo.setCurrentIndex(model_index)
         mode_index = self.mode_combo.findData(task["mode"])
+        if mode_index < 0 and task["mode"] == MODE_DRESS_UP:
+            mode_index = self.mode_combo.findData(MODE_REFERENCE)
         if mode_index >= 0:
             self.mode_combo.setCurrentIndex(mode_index)
         self.prompt_edit.setPlainText(task["prompt"])
@@ -928,12 +939,7 @@ class CreatePage(QWidget):
             self.current_task_id, int(result["id"])
         )
         if saved_path:
-            show_saved_path(
-                self,
-                title="已保存到本地",
-                message="图片已保存到本地。",
-                path=saved_path,
-            )
+            show_saved_toast(self, saved_path)
 
     def _save_library_result(self) -> None:
         if self.current_task_id is None:

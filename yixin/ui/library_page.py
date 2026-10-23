@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QUrl
+from PySide6.QtCore import QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QFrame,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -21,7 +22,104 @@ from PySide6.QtWidgets import (
 
 from ..database import Database
 from ..library import LibraryService
-from .widgets import ImageStrip, ImageView, load_scaled_pixmap
+from .widgets import (
+    SUPPORTED_REFERENCE_SUFFIXES,
+    ImageStrip,
+    ImageView,
+    load_scaled_pixmap,
+    scan_image_inputs,
+)
+
+
+def _drop_inputs(mime) -> list[Path]:
+    if not mime.hasUrls():
+        return []
+    paths = [
+        Path(url.toLocalFile())
+        for url in mime.urls()
+        if url.isLocalFile()
+    ]
+    return [
+        path
+        for path in paths
+        if path.is_dir() or path.suffix.lower() in SUPPORTED_REFERENCE_SUFFIXES
+    ]
+
+
+class LibraryDropFrame(QFrame):
+    files_dropped = Signal(list)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("Card")
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event) -> None:
+        if _drop_inputs(event.mimeData()):
+            self.setStyleSheet(
+                "QFrame#Card { border:2px solid #3f73cb; background:#edf4ff;"
+                " border-radius:12px; }"
+            )
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if _drop_inputs(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:
+        self.setStyleSheet("")
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:
+        paths = _drop_inputs(event.mimeData())
+        self.setStyleSheet("")
+        if not paths:
+            event.ignore()
+            return
+        self.files_dropped.emit(paths)
+        event.acceptProposedAction()
+
+
+class LibraryWorkList(QListWidget):
+    files_dropped = Signal(list)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QListWidget.DragDropMode.DropOnly)
+
+    def dragEnterEvent(self, event) -> None:
+        if _drop_inputs(event.mimeData()):
+            self.setStyleSheet(
+                "QListWidget#WorkList { border:2px solid #3f73cb;"
+                " background:#edf4ff; border-radius:10px; }"
+            )
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if _drop_inputs(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:
+        self.setStyleSheet("")
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:
+        paths = _drop_inputs(event.mimeData())
+        self.setStyleSheet("")
+        if not paths:
+            event.ignore()
+            return
+        self.files_dropped.emit(paths)
+        event.acceptProposedAction()
 
 
 class LibraryPage(QWidget):
@@ -43,12 +141,23 @@ class LibraryPage(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.addWidget(splitter)
 
-        left = QFrame()
-        left.setObjectName("Card")
+        left = LibraryDropFrame()
+        self.left_card = left
         left_layout = QVBoxLayout(left)
+        title_row = QHBoxLayout()
         title = QLabel("本地作品库")
         title.setStyleSheet("font-size:21px;font-weight:700;")
-        left_layout.addWidget(title)
+        upload_images = QPushButton("上传图片")
+        upload_folder = QPushButton("上传文件夹")
+        upload_images.setObjectName("PrimaryButton")
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        title_row.addWidget(upload_images)
+        title_row.addWidget(upload_folder)
+        left_layout.addLayout(title_row)
+        drop_hint = QLabel("支持拖拽图片或文件夹到这里")
+        drop_hint.setStyleSheet("color:#6d7a91;")
+        left_layout.addWidget(drop_hint)
         search_row = QHBoxLayout()
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("搜索标题、提示词或标签")
@@ -60,7 +169,7 @@ class LibraryPage(QWidget):
         self.tag_list = QListWidget()
         self.tag_list.setMaximumHeight(120)
         left_layout.addWidget(self.tag_list)
-        self.work_list = QListWidget()
+        self.work_list = LibraryWorkList()
         self.work_list.setObjectName("WorkList")
         self.work_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.work_list.setIconSize(QSize(190, 190))
@@ -121,7 +230,63 @@ class LibraryPage(QWidget):
         self.delete_button.clicked.connect(self._delete_current)
         self.open_folder_button.clicked.connect(self._open_work_folder)
         save_tags.clicked.connect(self._save_tags)
+        upload_images.clicked.connect(self._upload_image_files)
+        upload_folder.clicked.connect(self._upload_image_folder)
+        left.files_dropped.connect(self._import_manual_inputs)
+        self.work_list.files_dropped.connect(self._import_manual_inputs)
         self.refresh()
+
+    def _upload_image_files(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "上传图片到作品库",
+            "",
+            "图片 (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff);;所有文件 (*)",
+        )
+        if paths:
+            self._import_manual_inputs([Path(path) for path in paths])
+
+    def _upload_image_folder(self) -> None:
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "上传文件夹到作品库",
+        )
+        if directory:
+            self._import_manual_inputs([Path(directory)])
+
+    def _import_manual_inputs(self, inputs: list[Path]) -> None:
+        paths, scan_errors = scan_image_inputs(inputs)
+        if not paths:
+            details = "\n".join(scan_errors[:8])
+            if details:
+                QMessageBox.warning(self, "没有可导入图片", details)
+            else:
+                QMessageBox.information(
+                    self,
+                    "没有可导入图片",
+                    "所选位置中没有支持的图片。",
+                )
+            return
+        summary = self.library_service.import_images(paths)
+        errors = [*scan_errors, *summary.errors]
+        if summary.work_ids:
+            self.current_work_id = summary.work_ids[-1]
+            self.refresh()
+            status_bar = getattr(self.window(), "statusBar", None)
+            if callable(status_bar):
+                status_bar().showMessage(
+                    f"已导入 {len(summary.work_ids)} 件作品",
+                    5000,
+                )
+        if errors:
+            QMessageBox.warning(
+                self,
+                "部分图片未导入",
+                f"成功 {len(summary.work_ids)} 张，失败 {len(errors)} 张。\n"
+                + "\n".join(errors[:8]),
+            )
+        elif not summary.work_ids:
+            QMessageBox.information(self, "导入失败", "没有图片导入成功。")
 
     def refresh(self) -> None:
         checked_tags = self._checked_tags()
@@ -187,6 +352,7 @@ class LibraryPage(QWidget):
             self.detail_title.setText("选择一个作品")
             self.meta_label.setText("作品详情、标签和保存位置会显示在这里。")
             self.prompt_view.clear()
+            self.prompt_view.setPlaceholderText("")
             self.tags_edit.clear()
             self.path_edit.clear()
             self.asset_strip.clear()
@@ -205,12 +371,23 @@ class LibraryPage(QWidget):
         self.current_work_id = work_id
         self.detail_title.setText(work["title"])
         params = self.library_service.work_parameters(work)
-        self.meta_label.setText(
-            f"{work['model']} · 宽高比 {params.get('aspect_ratio', '—')}"
-            f" · 分辨率 {params.get('resolution') or '自动'} · 数量 {params.get('n', '—')}"
-            f" · {work['created_at'].replace('T', ' ')[:16]}"
-        )
-        self.prompt_view.setPlainText(work["prompt"])
+        if work["model"] == "手动上传":
+            self.meta_label.setText(
+                f"手动上传 · 原图 {params.get('width', '—')}×{params.get('height', '—')}"
+                f" · {work['created_at'].replace('T', ' ')[:16]}"
+            )
+        else:
+            self.meta_label.setText(
+                f"{work['model']} · 宽高比 {params.get('aspect_ratio', '—')}"
+                f" · 分辨率 {params.get('resolution') or '自动'} · 数量 {params.get('n', '—')}"
+                f" · {work['created_at'].replace('T', ' ')[:16]}"
+            )
+        if work["prompt"]:
+            self.prompt_view.setPlainText(work["prompt"])
+            self.prompt_view.setPlaceholderText("")
+        else:
+            self.prompt_view.clear()
+            self.prompt_view.setPlaceholderText("手动上传作品没有生成提示词")
         self.tags_edit.setText(", ".join(self.database.get_work_tags(work_id)))
         self.delete_button.setEnabled(True)
         try:
@@ -277,7 +454,7 @@ class LibraryPage(QWidget):
         answer = QMessageBox.warning(
             self,
             "删除作品",
-            f"确定删除作品“{work['title']}”吗？\n本地生成图、参考图和缩略图都会删除。",
+            f"确定删除作品“{work['title']}”吗？\n本地作品图片、参考图和缩略图都会删除。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

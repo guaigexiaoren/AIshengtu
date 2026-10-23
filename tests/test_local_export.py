@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from yixin.database import Database
 from yixin.local_export import LocalImageExporter
@@ -16,7 +16,11 @@ from yixin.models import ImageRequest
 from yixin.paths import AppPaths
 from yixin.settings import AppSettings
 from yixin.storage import FileStore
-from yixin.ui.save_helpers import LocalSaveController
+from yixin.ui.save_helpers import (
+    LocalSaveController,
+    SavedPathToast,
+    show_saved_toast,
+)
 from tests.helpers import make_image, png_bytes
 
 
@@ -128,6 +132,48 @@ class LocalExportTests(unittest.TestCase):
             saved = controller.save(task_id, result_id)
         self.assertIsNotNone(saved)
         self.assertEqual(self.settings.fixed_folder(), destination.resolve())
+
+    def test_local_save_toast_is_short_non_blocking_and_replaces_previous(self) -> None:
+        host = QWidget()
+        host.resize(900, 600)
+        host.show()
+        self.app.processEvents()
+        first_path = self.root / "exports" / "first-output.png"
+        first_path.parent.mkdir()
+        first_path.write_bytes(png_bytes((20, 40, 60)))
+        toast = show_saved_toast(host, first_path)
+        self.app.processEvents()
+        self.assertIsInstance(toast, SavedPathToast)
+        self.assertTrue(toast.isVisible())
+        self.assertEqual(toast.timer.interval(), 3000)
+        texts = [label.text() for label in toast.findChildren(QLabel)]
+        self.assertIn("已保存到本地", texts)
+        self.assertIn("first-output.png", texts)
+        self.assertNotIn(str(first_path.parent), texts)
+        self.assertEqual(toast.toolTip(), str(first_path))
+
+        second_path = first_path.with_name("second-output.png")
+        second_path.write_bytes(png_bytes((60, 40, 20)))
+        second = show_saved_toast(host, second_path)
+        self.assertFalse(toast.isVisible())
+        self.app.processEvents()
+        self.assertIs(host._saved_path_toast, second)
+        with patch(
+            "yixin.ui.save_helpers.QDesktopServices.openUrl",
+            return_value=True,
+        ) as open_url:
+            second.open_button.click()
+            self.app.processEvents()
+        opened = Path(open_url.call_args.args[0].toLocalFile())
+        self.assertEqual(opened, second_path.parent)
+        self.assertIsNone(host._saved_path_toast)
+
+        third = show_saved_toast(host, first_path)
+        third.timer.timeout.emit()
+        self.assertFalse(third.isVisible())
+        self.app.processEvents()
+        self.assertIsNone(host._saved_path_toast)
+        host.close()
 
 
 if __name__ == "__main__":

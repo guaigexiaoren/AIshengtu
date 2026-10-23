@@ -175,49 +175,68 @@ class Database:
             )
 
     def create_task(self, request: ImageRequest) -> int:
-        request.validate()
+        return self.create_tasks((request,))[0]
+
+    def create_tasks(self, requests: Sequence[ImageRequest]) -> list[int]:
+        requests = tuple(requests)
+        if not requests:
+            raise ValueError("至少需要一个任务")
+        for request in requests:
+            request.validate()
+
+        task_ids: list[int] = []
         now = utc_now_iso()
         with self.connection() as connection:
-            cursor = connection.execute(
+            for request in requests:
+                task_ids.append(self._insert_task(connection, request, now))
+        return task_ids
+
+    @staticmethod
+    def _insert_task(
+        connection: sqlite3.Connection,
+        request: ImageRequest,
+        now: str,
+    ) -> int:
+        cursor = connection.execute(
+            """
+            INSERT INTO tasks(
+                status, mode, model, prompt, aspect_ratio, resolution, n,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                TASK_QUEUED,
+                request.mode,
+                request.model,
+                request.prompt.strip(),
+                request.aspect_ratio,
+                request.effective_resolution,
+                request.n,
+                now,
+                now,
+            ),
+        )
+        task_id = int(cursor.lastrowid)
+        for position, image in enumerate(request.reference_images):
+            connection.execute(
                 """
-                INSERT INTO tasks(
-                    status, mode, model, prompt, aspect_ratio, resolution, n,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO task_assets(
+                    task_id, role, position, path, content_hash, mime,
+                    width, height, original_name, source_path
+                ) VALUES (?, 'reference', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    TASK_QUEUED,
-                    request.mode,
-                    request.model,
-                    request.prompt.strip(),
-                    request.aspect_ratio,
-                    request.effective_resolution,
-                    request.n,
-                    now,
-                    now,
+                    task_id,
+                    position,
+                    str(image.path),
+                    image.content_hash,
+                    image.mime,
+                    image.width,
+                    image.height,
+                    image.original_name,
+                    str(image.source_path) if image.source_path else None,
                 ),
             )
-            task_id = int(cursor.lastrowid)
-            for position, image in enumerate(request.reference_images):
-                connection.execute(
-                    """
-                    INSERT INTO task_assets(
-                        task_id, role, position, path, content_hash, mime,
-                        width, height, original_name, source_path
-                    ) VALUES (?, 'reference', ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        task_id,
-                        position,
-                        str(image.path),
-                        image.content_hash,
-                        image.mime,
-                        image.width,
-                        image.height,
-                        image.original_name,
-                        str(image.source_path) if image.source_path else None,
-                    ),
-                )
         return task_id
 
     def claim_next_queued(self) -> dict[str, Any] | None:
@@ -536,48 +555,18 @@ class Database:
         saved_width: int,
         saved_height: int,
     ) -> int:
-        now = utc_now_iso()
         with self.connection() as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO works(
-                    task_id, folder_name, title, prompt, model,
-                    parameters_json, raw_response, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task_id,
-                    folder_name,
-                    title,
-                    prompt,
-                    model,
-                    json.dumps(parameters, ensure_ascii=False, sort_keys=True),
-                    raw_response,
-                    now,
-                    now,
-                ),
+            work_id = self._insert_work_with_assets(
+                connection,
+                task_id=task_id,
+                folder_name=folder_name,
+                title=title,
+                prompt=prompt,
+                model=model,
+                parameters=parameters,
+                raw_response=raw_response,
+                assets=assets,
             )
-            work_id = int(cursor.lastrowid)
-            for role, position, image in assets:
-                connection.execute(
-                    """
-                    INSERT INTO work_assets(
-                        work_id, role, position, path, content_hash, mime,
-                        width, height, original_name
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        work_id,
-                        role,
-                        position,
-                        str(image.path),
-                        image.content_hash,
-                        image.mime,
-                        image.width,
-                        image.height,
-                        image.original_name,
-                    ),
-                )
             updated = connection.execute(
                 """
                 UPDATE task_results
@@ -598,6 +587,83 @@ class Database:
             if updated.rowcount != 1:
                 raise ValueError("生成结果不存在，作品保存已回滚")
             return work_id
+
+    def create_manual_work_with_assets(
+        self,
+        *,
+        folder_name: str,
+        title: str,
+        parameters: dict[str, Any],
+        assets: Sequence[tuple[str, int, StoredImage]],
+    ) -> int:
+        with self.connection() as connection:
+            return self._insert_work_with_assets(
+                connection,
+                task_id=None,
+                folder_name=folder_name,
+                title=title,
+                prompt="",
+                model="手动上传",
+                parameters=parameters,
+                raw_response=None,
+                assets=assets,
+            )
+
+    @staticmethod
+    def _insert_work_with_assets(
+        connection: sqlite3.Connection,
+        *,
+        task_id: int | None,
+        folder_name: str,
+        title: str,
+        prompt: str,
+        model: str,
+        parameters: dict[str, Any],
+        raw_response: str | None,
+        assets: Sequence[tuple[str, int, StoredImage]],
+    ) -> int:
+        now = utc_now_iso()
+        cursor = connection.execute(
+            """
+            INSERT INTO works(
+                task_id, folder_name, title, prompt, model,
+                parameters_json, raw_response, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                folder_name,
+                title,
+                prompt,
+                model,
+                json.dumps(parameters, ensure_ascii=False, sort_keys=True),
+                raw_response,
+                now,
+                now,
+            ),
+        )
+        work_id = int(cursor.lastrowid)
+        for role, position, image in assets:
+            connection.execute(
+                """
+                INSERT INTO work_assets(
+                    work_id, role, position, path, content_hash, mime,
+                    width, height, original_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    work_id,
+                    role,
+                    position,
+                    str(image.path),
+                    image.content_hash,
+                    image.mime,
+                    image.width,
+                    image.height,
+                    image.original_name,
+                ),
+            )
+        return work_id
 
     def get_work(self, work_id: int) -> dict[str, Any] | None:
         with self.connection() as connection:

@@ -163,6 +163,63 @@ class DatabaseLibraryTests(unittest.TestCase):
         self.database.delete_template(template_id)
         self.assertEqual(self.database.list_templates(), [])
 
+    def test_manual_images_become_independent_library_works(self) -> None:
+        first = make_image(
+            Path(self.temp.name) / "手动 第一张.png",
+            (20, 40, 80),
+        )
+        second = make_image(
+            Path(self.temp.name) / "manual-second.png",
+            (80, 40, 20),
+        )
+        summary = self.library.import_images([first, second, first])
+        self.assertEqual(len(summary.work_ids), 3)
+        self.assertEqual(summary.errors, ())
+
+        works = self.database.list_works()
+        self.assertEqual(len(works), 3)
+        titles = [work["title"] for work in works]
+        self.assertIn("手动 第一张", titles)
+        self.assertIn("manual-second", titles)
+        manual = next(work for work in works if work["title"] == "manual-second")
+        self.assertIsNone(manual["task_id"])
+        self.assertEqual(manual["model"], "手动上传")
+        self.assertEqual(manual["prompt"], "")
+        parameters = self.library.work_parameters(manual)
+        self.assertEqual(parameters["source"], "manual_upload")
+        self.assertEqual(parameters["width"], 64)
+        self.assertEqual(parameters["height"], 80)
+
+        folder = self.library.work_folder(manual["id"])
+        self.assertTrue(any(folder.glob("output.*")))
+        self.assertTrue((folder / "thumbnail.jpg").is_file())
+        assets = self.database.get_work_assets(manual["id"])
+        self.assertEqual(
+            sorted(asset["role"] for asset in assets),
+            ["result", "thumbnail"],
+        )
+
+        self.database.set_work_tags(manual["id"], ["手动", "人像"])
+        self.assertEqual(
+            [work["id"] for work in self.database.list_works(tags=["手动", "人像"])],
+            [manual["id"]],
+        )
+        self.assertTrue(self.library.delete_work(manual["id"]))
+        self.assertFalse(folder.exists())
+
+    def test_manual_import_keeps_successes_when_one_file_fails(self) -> None:
+        valid = make_image(
+            Path(self.temp.name) / "valid.png",
+            (20, 70, 40),
+        )
+        invalid = Path(self.temp.name) / "broken.png"
+        invalid.write_bytes(b"not an image")
+        summary = self.library.import_images([invalid, valid])
+        self.assertEqual(len(summary.work_ids), 1)
+        self.assertEqual(len(summary.errors), 1)
+        self.assertIn("broken.png", summary.errors[0])
+        self.assertEqual(len(self.database.list_works()), 1)
+
     def test_data_directory_ensure_preserves_sentinel(self) -> None:
         sentinel = self.paths.root / "keep.txt"
         sentinel.write_text("保留", encoding="utf-8")

@@ -2,13 +2,26 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .database import Database
 from .models import StoredImage
 from .paths import AppPaths
-from .storage import FileStore, image_metadata, sha256_file
+from .storage import (
+    SUPPORTED_IMAGE_SUFFIXES,
+    FileStore,
+    image_metadata,
+    sha256_file,
+)
+
+
+@dataclass(frozen=True)
+class LibraryImportSummary:
+    work_ids: tuple[int, ...]
+    errors: tuple[str, ...]
 
 
 class LibraryService:
@@ -21,6 +34,81 @@ class LibraryService:
         self.database = database
         self.file_store = file_store
         self.paths = paths
+
+    def import_image(self, source: Path) -> int:
+        source = Path(source).expanduser().resolve()
+        if not source.is_file():
+            raise ValueError("图片文件不存在")
+        if source.suffix.lower() not in SUPPORTED_IMAGE_SUFFIXES:
+            raise ValueError("暂不支持这种图片格式")
+
+        folder_name = uuid.uuid4().hex
+        folder = self.file_store.library_folder(folder_name)
+        folder.mkdir(parents=True, exist_ok=False)
+        work_id: int | None = None
+        try:
+            output_path = self.file_store.copy_to_library(
+                folder,
+                source,
+                "output",
+            )
+            mime, width, height = image_metadata(output_path.read_bytes())
+            output_stored = StoredImage(
+                path=output_path,
+                content_hash=sha256_file(output_path),
+                mime=mime,
+                width=width,
+                height=height,
+                original_name=source.name,
+            )
+            thumbnail_path = self.file_store.create_thumbnail(
+                output_path,
+                folder / "thumbnail.jpg",
+            )
+            thumbnail = StoredImage(
+                path=thumbnail_path,
+                content_hash=sha256_file(thumbnail_path),
+                mime="image/jpeg",
+                width=0,
+                height=0,
+                original_name="thumbnail.jpg",
+            )
+            title = source.stem.strip()[:48] or "手动上传作品"
+            work_id = self.database.create_manual_work_with_assets(
+                folder_name=folder_name,
+                title=title,
+                parameters={
+                    "source": "manual_upload",
+                    "width": width,
+                    "height": height,
+                },
+                assets=(
+                    ("result", 0, output_stored),
+                    ("thumbnail", 0, thumbnail),
+                ),
+            )
+            return work_id
+        except Exception:
+            if work_id is not None:
+                try:
+                    self.database.delete_work(work_id)
+                except Exception:
+                    pass
+            try:
+                self.file_store.remove_work_folder(folder)
+            except Exception:
+                pass
+            raise
+
+    def import_images(self, paths: Sequence[Path]) -> LibraryImportSummary:
+        work_ids: list[int] = []
+        errors: list[str] = []
+        for path in paths:
+            try:
+                work_ids.append(self.import_image(path))
+            except Exception as exc:
+                errors.append(f"{Path(path).name}：{exc}")
+        return LibraryImportSummary(tuple(work_ids), tuple(errors))
 
     def save_task_result(self, task_id: int, result_id: int) -> int:
         task = self.database.get_task(task_id)

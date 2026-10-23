@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..constants import APP_NAME, STATUS_LABELS
+from ..constants import APP_NAME, MODE_DRESS_UP, STATUS_LABELS
 from ..database import Database
 from ..library import LibraryService
 from ..logging_utils import register_sensitive_value
@@ -25,6 +25,7 @@ from ..paths import AppPaths
 from ..security import SecretStore
 from ..storage import FileStore
 from ..worker import TaskWorker
+from .batch_dress_page import BatchDressPage
 from .create_page import CreatePage
 from .dialogs import SettingsDialog
 from .history_page import HistoryPage
@@ -66,9 +67,17 @@ class MainWindow(QMainWindow):
             worker,
             secret_store,
         )
+        self.batch_dress_page = BatchDressPage(
+            database,
+            file_store,
+            library_service,
+            worker,
+            secret_store,
+        )
         self.history_page = HistoryPage(database, library_service, worker)
         self.library_page = LibraryPage(database, library_service)
         self.stack.addWidget(self.create_page)
+        self.stack.addWidget(self.batch_dress_page)
         self.stack.addWidget(self.history_page)
         self.stack.addWidget(self.library_page)
         root.addWidget(self.stack, 1)
@@ -88,9 +97,17 @@ class MainWindow(QMainWindow):
 
         self.nav_list.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.create_page.settings_requested.connect(self.open_settings)
+        self.batch_dress_page.settings_requested.connect(self.open_settings)
+        self.batch_dress_page.tasks_enqueued.connect(self._on_batch_enqueued)
+        self.create_page.templates_changed.connect(
+            self.batch_dress_page.refresh_templates
+        )
+        self.batch_dress_page.templates_changed.connect(
+            self.create_page.refresh_templates
+        )
         self.create_page.library_changed.connect(self.library_page.refresh)
         self.history_page.library_changed.connect(self.library_page.refresh)
-        self.history_page.retry_requested.connect(self._open_retry_in_create)
+        self.history_page.retry_requested.connect(self._open_retry)
         self.worker.signals.task_changed.connect(self._on_task_changed)
         self.nav_list.setCurrentRow(0)
 
@@ -110,7 +127,7 @@ class MainWindow(QMainWindow):
         layout.addSpacing(20)
         self.nav_list = QListWidget()
         self.nav_list.setObjectName("NavList")
-        for text in ("创作", "历史记录", "作品库"):
+        for text in ("创作", "批量换装", "历史记录", "作品库"):
             item = QListWidgetItem(text)
             item.setSizeHint(item.sizeHint().expandedTo(item.sizeHint()))
             self.nav_list.addItem(item)
@@ -137,11 +154,27 @@ class MainWindow(QMainWindow):
             f"任务 #{task_id}：{label} · 数据目录：{self.paths.root}", 8000
         )
 
-    def _open_retry_in_create(self, task_id: int) -> None:
+    def _on_batch_enqueued(self, count: int) -> None:
+        self.statusBar().showMessage(
+            f"批量换装已加入 {count} 个排队任务 · 数据目录：{self.paths.root}",
+            8000,
+        )
+
+    def _open_retry(self, task_id: int) -> None:
+        task = self.database.get_task(task_id)
+        if task and task["mode"] == MODE_DRESS_UP:
+            self.nav_list.setCurrentRow(1)
+            self.batch_dress_page.prepare_retry(task_id)
+            self.statusBar().showMessage(
+                f"已载入批量换装任务 #{task_id}，修改后重新生成",
+                8000,
+            )
+            return
         self.nav_list.setCurrentRow(0)
         self.create_page.prepare_retry(task_id)
         self.statusBar().showMessage(
-            f"已载入任务 #{task_id}，修改参数后点击生成", 8000
+            f"已载入任务 #{task_id}，修改参数后点击生成",
+            8000,
         )
 
     def closeEvent(self, event) -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import re
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -24,14 +26,71 @@ from PySide6.QtWidgets import (
 )
 
 from ..models import StoredImage
+from ..storage import SUPPORTED_IMAGE_SUFFIXES
 
 
-SUPPORTED_REFERENCE_SUFFIXES = frozenset(
-    {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
-)
+SUPPORTED_REFERENCE_SUFFIXES = SUPPORTED_IMAGE_SUFFIXES
+PREVIEW_CANVAS_COLOR = "#eef2f7"
+PREVIEW_TEXT_COLOR = "#60708a"
 
 _THUMBNAIL_CACHE: OrderedDict[tuple[str, int, int, int], QPixmap] = OrderedDict()
 _THUMBNAIL_CACHE_LIMIT = 192
+
+
+def natural_sort_key(relative_path: str) -> tuple[tuple[int, str | int], ...]:
+    parts = re.split(r"(\d+)", relative_path.replace("\\", "/").casefold())
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part)
+        for part in parts
+        if part
+    )
+
+
+def scan_image_inputs(inputs: Sequence[Path]) -> tuple[list[Path], list[str]]:
+    images: list[Path] = []
+    errors: list[str] = []
+
+    for raw_path in inputs:
+        path = Path(raw_path).expanduser()
+        if path.is_file():
+            if path.suffix.lower() in SUPPORTED_REFERENCE_SUFFIXES:
+                images.append(path.resolve())
+            continue
+        if not path.is_dir():
+            errors.append(f"{path}：路径不存在")
+            continue
+
+        folder_images: list[tuple[str, Path]] = []
+
+        def on_error(error: OSError) -> None:
+            errors.append(f"{error.filename or path}：{error.strerror or error}")
+
+        for root, directories, filenames in os.walk(
+            path,
+            followlinks=False,
+            onerror=on_error,
+        ):
+            root_path = Path(root)
+            directories[:] = [
+                name
+                for name in directories
+                if not (root_path / name).is_symlink()
+            ]
+            for filename in filenames:
+                candidate = root_path / filename
+                if candidate.suffix.lower() not in SUPPORTED_REFERENCE_SUFFIXES:
+                    continue
+                folder_images.append(
+                    (candidate.relative_to(path).as_posix(), candidate.resolve())
+                )
+        images.extend(
+            candidate
+            for _, candidate in sorted(
+                folder_images,
+                key=lambda item: natural_sort_key(item[0]),
+            )
+        )
+    return images, errors
 
 
 def load_scaled_pixmap(
@@ -179,9 +238,9 @@ class ImageView(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#171d29"))
+        painter.fillRect(self.rect(), QColor(PREVIEW_CANVAS_COLOR))
         if not self._pixmap:
-            painter.setPen(QColor("#8492a8"))
+            painter.setPen(QColor(PREVIEW_TEXT_COLOR))
             font = QFont(self.font())
             font.setPointSize(12)
             painter.setFont(font)

@@ -32,6 +32,9 @@ MIME_TO_SUFFIX = {
     "image/bmp": ".bmp",
     "image/tiff": ".tiff",
 }
+SUPPORTED_IMAGE_SUFFIXES = frozenset(
+    {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+)
 
 
 class ImageValidationError(ValueError):

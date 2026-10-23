@@ -34,6 +34,7 @@ DEFAULT_RESOLUTION = "2K"
 
 MAX_BATCH_SIZE = 4
 MAX_REFERENCE_IMAGES = 14
+MAX_BATCH_ASSETS = 50
 DEFAULT_BATCH_SIZE = 1
 
 TASK_QUEUED = "queued"
@@ -47,9 +48,11 @@ TASK_STATUSES = frozenset(
 
 MODE_TEXT = "text"
 MODE_REFERENCE = "reference"
+MODE_DRESS_UP = "dress_up"
 MODE_LABELS = {
     MODE_TEXT: "文字生图",
     MODE_REFERENCE: "参考图编辑",
+    MODE_DRESS_UP: "批量换装",
 }
 
 STATUS_LABELS = {

@@ -10,7 +10,7 @@ import httpx
 from yixin.api import NanoBananaClient
 from yixin.constants import DEFAULT_ASPECT_RATIO, DEFAULT_RESOLUTION
 from yixin.models import ApiError, ImageRequest, StoredImage
-from yixin.storage import FileStore
+from yixin.storage import FileStore, data_url_for_file
 from yixin.paths import AppPaths
 from tests.helpers import png_bytes
 
@@ -102,6 +102,29 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(payload["images"]), 2)
         self.assertNotIn("image", payload)
         self.assertNotEqual(payload["images"][0], payload["images"][1])
+
+    def test_batch_dress_up_mode_is_not_sent_and_keeps_reference_order(self) -> None:
+        client = NanoBananaClient(lambda: self.key)
+        request = ImageRequest(
+            model="gemini-3-pro-image",
+            prompt="将第1张服装穿到第2张人物身上",
+            n=1,
+            aspect_ratio="3:4",
+            resolution="2K",
+            reference_images=(self.reference, self.second_reference),
+            mode="dress_up",
+        )
+        payload = client.build_payload(request)
+        self.assertNotIn("mode", payload)
+        self.assertEqual(len(payload["images"]), 2)
+        self.assertEqual(
+            payload["images"][0],
+            data_url_for_file(self.reference.path, self.reference.mime),
+        )
+        self.assertEqual(
+            payload["images"][1],
+            data_url_for_file(self.second_reference.path, self.second_reference.mime),
+        )
 
     def test_fifteen_references_are_rejected(self) -> None:
         refs = tuple(self.reference for _ in range(15))

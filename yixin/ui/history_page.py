@@ -34,7 +34,7 @@ from ..local_export import LocalImageExporter
 from ..settings import AppSettings
 from ..time_utils import format_task_elapsed
 from ..worker import TaskWorker
-from .save_helpers import LocalSaveController, show_saved_path
+from .save_helpers import LocalSaveController, show_saved_path, show_saved_toast
 from .widgets import ImageStrip, ImageView, TaskImageAsset, build_task_assets
 
 TASK_DATA_ROLE = int(Qt.ItemDataRole.UserRole) + 1
@@ -92,7 +92,7 @@ class HistoryPage(QWidget):
         list_layout.addLayout(filter_row)
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
-            ["ID", "提交时间", "状态", "总耗时", "模型", "提示词"]
+            ["ID", "提交时间", "状态", "总耗时", "模式 / 模型", "提示词"]
         )
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -103,7 +103,7 @@ class HistoryPage(QWidget):
         self.table.setColumnWidth(1, 118)
         self.table.setColumnWidth(2, 52)
         self.table.setColumnWidth(3, 70)
-        self.table.setColumnWidth(4, 86)
+        self.table.setColumnWidth(4, 124)
         self.table.horizontalHeader().setStretchLastSection(True)
         list_layout.addWidget(self.table, 1)
 
@@ -195,7 +195,8 @@ class HistoryPage(QWidget):
             task["created_at"].replace("T", " ")[:16],
             STATUS_LABELS.get(task["status"], task["status"]),
             format_task_elapsed(task),
-            next(
+            f"{MODE_LABELS.get(task['mode'], task['mode'])} · "
+            + next(
                 (name for name, model_id in MODEL_OPTIONS if model_id == task["model"]),
                 task["model"],
             ),
@@ -398,12 +399,7 @@ class HistoryPage(QWidget):
             self.current_task_id, int(result["id"])
         )
         if saved_path:
-            show_saved_path(
-                self,
-                title="已保存到本地",
-                message="图片已保存到本地。",
-                path=saved_path,
-            )
+            show_saved_toast(self, saved_path)
 
     def _save_library_result(self) -> None:
         if self.current_task_id is None:

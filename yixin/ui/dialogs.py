@@ -274,6 +274,7 @@ class TemplateManagerDialog(QDialog):
         self.database = database
         self.current_prompt = current_prompt
         self.selected_prompt: str | None = None
+        self.templates_changed = False
         self.setWindowTitle("提示词模板")
         self.resize(720, 520)
         layout = QVBoxLayout(self)
@@ -343,6 +344,7 @@ class TemplateManagerDialog(QDialog):
         if not result:
             return
         self.database.save_template(*result)
+        self.templates_changed = True
         self._refresh()
 
     def _edit(self) -> None:
@@ -356,6 +358,7 @@ class TemplateManagerDialog(QDialog):
         self.database.save_template(new_name, prompt)
         if new_name != template["name"]:
             self.database.delete_template(template["id"])
+        self.templates_changed = True
         self._refresh()
 
     def _delete(self) -> None:
@@ -367,6 +370,7 @@ class TemplateManagerDialog(QDialog):
         )
         if answer == QMessageBox.StandardButton.Yes:
             self.database.delete_template(template["id"])
+            self.templates_changed = True
             self._refresh()
 
     def _use(self) -> None:

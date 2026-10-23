@@ -5,12 +5,23 @@ import unittest
 import sqlite3
 from pathlib import Path
 
-from yixin.constants import TASK_CANCELLED, TASK_FAILED, TASK_RUNNING, TASK_SUCCESS
+from yixin.constants import (
+    BUILTIN_PROMPT_TEMPLATES,
+    TASK_CANCELLED,
+    TASK_FAILED,
+    TASK_RUNNING,
+    TASK_SUCCESS,
+)
 from yixin.database import Database, StateTransitionError
 from yixin.library import LibraryService
 from yixin.models import ImageRequest
 from yixin.paths import AppPaths
-from yixin.settings import AppSettings
+from yixin.settings import (
+    INPUT_BATCH_GARMENT,
+    INPUT_BATCH_PERSON,
+    INPUT_CREATE_REFERENCE,
+    AppSettings,
+)
 from yixin.storage import FileStore
 from tests.helpers import make_image, png_bytes
 
@@ -156,12 +167,41 @@ class DatabaseLibraryTests(unittest.TestCase):
 
     def test_templates_crud(self) -> None:
         template_id = self.database.save_template("人像", "柔和光线的人像")
-        self.assertEqual(self.database.list_templates()[0]["prompt"], "柔和光线的人像")
+        custom = next(
+            item for item in self.database.list_templates() if item["name"] == "人像"
+        )
+        self.assertEqual(custom["prompt"], "柔和光线的人像")
         self.database.save_template("人像", "更新后的提示词")
-        self.assertEqual(len(self.database.list_templates()), 1)
-        self.assertEqual(self.database.list_templates()[0]["prompt"], "更新后的提示词")
+        custom = next(
+            item for item in self.database.list_templates() if item["name"] == "人像"
+        )
+        self.assertEqual(custom["prompt"], "更新后的提示词")
         self.database.delete_template(template_id)
-        self.assertEqual(self.database.list_templates(), [])
+        self.assertNotIn(
+            "人像",
+            [item["name"] for item in self.database.list_templates()],
+        )
+
+    def test_builtin_templates_are_seeded_once_and_remain_editable(self) -> None:
+        templates = {
+            item["name"]: item for item in self.database.list_templates()
+        }
+        self.assertEqual(
+            set(templates),
+            {name for name, _ in BUILTIN_PROMPT_TEMPLATES},
+        )
+        base = templates["内置·基础服装替换"]
+        self.assertIn("【图2】中的人物的上衣改为【图1】中的服装", base["prompt"])
+
+        self.database.save_template("内置·基础服装替换", "用户修改后的内容")
+        self.database.delete_template(templates["内置·多图换装"]["id"])
+        self.database.initialize()
+        reopened = {
+            item["name"]: item["prompt"]
+            for item in self.database.list_templates()
+        }
+        self.assertEqual(reopened["内置·基础服装替换"], "用户修改后的内容")
+        self.assertNotIn("内置·多图换装", reopened)
 
     def test_manual_images_become_independent_library_works(self) -> None:
         first = make_image(
@@ -240,6 +280,37 @@ class DatabaseLibraryTests(unittest.TestCase):
         self.assertEqual(reopened.local_save_mode(), "fixed")
         self.assertEqual(reopened.fixed_folder(), Path(self.temp.name) / "fixed")
         self.assertEqual(reopened.last_folder(), Path(self.temp.name) / "last")
+
+    def test_input_folder_settings_are_independent_and_clear_missing_paths(
+        self,
+    ) -> None:
+        settings = AppSettings(self.database)
+        create_folder = Path(self.temp.name) / "create"
+        garment_folder = Path(self.temp.name) / "garment"
+        person_folder = Path(self.temp.name) / "person"
+        for folder in (create_folder, garment_folder, person_folder):
+            folder.mkdir()
+        settings.set_input_folder(INPUT_CREATE_REFERENCE, create_folder)
+        settings.set_input_folder(INPUT_BATCH_GARMENT, garment_folder)
+        settings.set_input_folder(INPUT_BATCH_PERSON, person_folder)
+        self.assertEqual(
+            settings.input_folder(INPUT_CREATE_REFERENCE),
+            create_folder,
+        )
+        self.assertEqual(
+            settings.input_folder(INPUT_BATCH_GARMENT),
+            garment_folder,
+        )
+        self.assertEqual(
+            settings.input_folder(INPUT_BATCH_PERSON),
+            person_folder,
+        )
+        garment_folder.rmdir()
+        self.assertIsNone(settings.input_folder(INPUT_BATCH_GARMENT))
+        self.assertEqual(
+            self.database.get_setting("input_last_folder_batch_garment", ""),
+            "",
+        )
 
     def test_version_one_database_migrates_without_losing_rows(self) -> None:
         legacy_path = Path(self.temp.name) / "legacy" / "app.db"

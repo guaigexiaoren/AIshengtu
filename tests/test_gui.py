@@ -12,14 +12,19 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QMimeData, QPoint, QPointF, QSize, Qt, QUrl
 from PySide6.QtGui import QDropEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QPushButton
 
 from yixin.database import Database
 from yixin.library import LibraryService
 from yixin.models import ImageApiResult, ImageRequest, RemoteImage
 from yixin.paths import AppPaths
 from yixin.security import SecretStore
-from yixin.settings import AppSettings
+from yixin.settings import (
+    INPUT_BATCH_GARMENT,
+    INPUT_BATCH_PERSON,
+    INPUT_CREATE_REFERENCE,
+    AppSettings,
+)
 from yixin.storage import FileStore
 from yixin.ui.dialogs import LibraryPickerDialog
 from yixin.ui.crop import CropCanvas
@@ -150,18 +155,143 @@ class GuiFlowTests(unittest.TestCase):
             if data and data["name"] == "测试模板":
                 page.template_combo.setCurrentIndex(index)
                 break
-        page._apply_template()
+        self.app.processEvents()
         self.assertEqual(page.prompt_edit.toPlainText(), "来自模板的提示词")
+
+    def test_create_template_switches_immediately_and_safely(self) -> None:
+        self.database.save_template("模板A", "提示词 A")
+        self.database.save_template("模板B", "提示词 B")
+        page = self.window.create_page
+        page.refresh_templates()
+        index_a = page.template_combo.findText("模板A")
+        index_b = page.template_combo.findText("模板B")
+        page.template_combo.setCurrentIndex(index_a)
+        self.app.processEvents()
+        self.assertEqual(page.prompt_edit.toPlainText(), "提示词 A")
+        page.template_combo.setCurrentIndex(index_b)
+        self.app.processEvents()
+        self.assertEqual(page.prompt_edit.toPlainText(), "提示词 B")
+
+        page.prompt_edit.setPlainText("用户修改后的内容")
+        page.refresh_templates()
+        self.assertEqual(page.prompt_edit.toPlainText(), "用户修改后的内容")
+        page.template_combo.setCurrentIndex(0)
+        self.assertEqual(page.prompt_edit.toPlainText(), "用户修改后的内容")
+        self.assertNotIn(
+            "应用",
+            [button.text() for button in page.findChildren(QPushButton)],
+        )
 
     def test_ui_reference_limit_is_fourteen(self) -> None:
         page = self.window.create_page
         page.mode_combo.setCurrentIndex(1)
-        source = make_image(Path(self.temp.name) / "limit.png")
+        sources = [
+            make_image(
+                Path(self.temp.name) / f"limit-{index:02d}.png",
+                (index, 40, 60),
+            )
+            for index in range(15)
+        ]
         with patch("yixin.ui.create_page.QMessageBox.information"):
-            page._add_stored_references([source] * 15)
-            page._add_stored_references([source])
+            page._add_stored_references(sources)
         self.assertEqual(len(page.reference_images), 14)
         self.assertIn("14 / 14", page.reference_count_label.text())
+
+    def test_create_reference_buttons_and_folder_import(self) -> None:
+        page = self.window.create_page
+        button_texts = [
+            button.text()
+            for button in page.reference_group.findChildren(QPushButton)
+        ]
+        self.assertEqual(button_texts[:4], ["添加图片", "添加文件夹", "从作品库添加", "裁剪"])
+        self.window.resize(1180, 720)
+        self.app.processEvents()
+        for button in page.reference_group.findChildren(QPushButton):
+            right = button.mapTo(
+                page.reference_group,
+                QPoint(button.width(), 0),
+            ).x()
+            self.assertLessEqual(right, page.reference_group.width())
+
+        root = Path(self.temp.name) / "创作文件夹"
+        nested = root / "子目录"
+        nested.mkdir(parents=True)
+        first = make_image(root / "2.png", (20, 50, 80))
+        second = make_image(nested / "10.png", (50, 80, 20))
+        duplicate = root / "duplicate.png"
+        duplicate.write_bytes(first.read_bytes())
+        (root / "ignore.txt").write_text("ignore", encoding="utf-8")
+        invalid = root / "broken.png"
+        invalid.write_bytes(b"not an image")
+        with (
+            patch(
+                "yixin.ui.create_page.QFileDialog.getExistingDirectory",
+                return_value=str(root),
+            ),
+            patch("yixin.ui.create_page.QMessageBox.warning") as warning,
+        ):
+            page._add_local_reference_folder()
+        self.assertEqual(
+            [image.original_name for image in page.reference_images],
+            ["2.png", "10.png"],
+        )
+        self.assertEqual(AppSettings(self.database).input_folder(INPUT_CREATE_REFERENCE), root)
+        warning.assert_called_once()
+
+    def test_reference_input_paths_are_remembered_per_scope(self) -> None:
+        page = self.window.create_page
+        settings = AppSettings(self.database)
+        create_folder = Path(self.temp.name) / "创作上次目录"
+        garment_folder = Path(self.temp.name) / "服装上次目录"
+        person_folder = Path(self.temp.name) / "人物上次目录"
+        for folder in (create_folder, garment_folder, person_folder):
+            folder.mkdir()
+        image = make_image(create_folder / "参考.png", (20, 60, 90))
+        settings.set_input_folder(INPUT_CREATE_REFERENCE, create_folder)
+        with patch(
+            "yixin.ui.create_page.QFileDialog.getOpenFileNames",
+            return_value=([str(image)], ""),
+        ) as dialog:
+            page._add_local_references()
+        self.assertEqual(dialog.call_args.args[2], str(create_folder))
+        self.assertEqual(settings.input_folder(INPUT_CREATE_REFERENCE), create_folder)
+
+        settings.set_input_folder(INPUT_BATCH_GARMENT, garment_folder)
+        settings.set_input_folder(INPUT_BATCH_PERSON, person_folder)
+        batch = self.window.batch_dress_page
+        garment_memory = make_image(garment_folder / "服装.png", (20, 80, 40))
+        person_memory = make_image(person_folder / "人物.png", (80, 20, 40))
+        with patch(
+            "yixin.ui.batch_dress_page.QFileDialog.getOpenFileNames",
+            side_effect=[
+                ([str(garment_memory)], ""),
+                ([str(person_memory)], ""),
+            ],
+        ) as dialog:
+            batch._add_image_files("garment")
+            batch._add_image_files("person")
+        self.assertEqual(dialog.call_args_list[0].args[2], str(garment_folder))
+        self.assertEqual(dialog.call_args_list[1].args[2], str(person_folder))
+        self.assertEqual(settings.input_folder(INPUT_BATCH_GARMENT), garment_folder)
+        self.assertEqual(settings.input_folder(INPUT_BATCH_PERSON), person_folder)
+
+        with patch(
+            "yixin.ui.create_page.QFileDialog.getExistingDirectory",
+            return_value="",
+        ) as folder_dialog:
+            page._add_local_reference_folder()
+        self.assertEqual(folder_dialog.call_args.args[2], str(create_folder))
+        self.assertEqual(settings.input_folder(INPUT_CREATE_REFERENCE), create_folder)
+
+        dragged_folder = Path(self.temp.name) / "拖入上次目录"
+        dragged_folder.mkdir()
+        make_image(dragged_folder / "drag.png", (40, 70, 100))
+        with patch("yixin.ui.create_page.QMessageBox.information"):
+            page._on_reference_files_dropped([dragged_folder])
+        self.assertEqual(
+            settings.input_folder(INPUT_CREATE_REFERENCE),
+            dragged_folder,
+        )
 
     def test_queue_is_below_generate_and_inside_scroll_content(self) -> None:
         page = self.window.create_page

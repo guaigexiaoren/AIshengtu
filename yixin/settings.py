@@ -14,6 +14,14 @@ LOCAL_SAVE_LABELS = {
     LOCAL_SAVE_FIXED: "固定文件夹",
     LOCAL_SAVE_REFERENCE: "参考图所在文件夹",
 }
+INPUT_CREATE_REFERENCE = "create_reference"
+INPUT_BATCH_GARMENT = "batch_garment"
+INPUT_BATCH_PERSON = "batch_person"
+INPUT_FOLDER_KEYS = {
+    INPUT_CREATE_REFERENCE: "input_last_folder_create_reference",
+    INPUT_BATCH_GARMENT: "input_last_folder_batch_garment",
+    INPUT_BATCH_PERSON: "input_last_folder_batch_person",
+}
 
 
 class AppSettings:
@@ -49,4 +57,26 @@ class AppSettings:
     def set_last_folder(self, folder: Path | None) -> None:
         self.database.set_setting(
             self.LAST_FOLDER_KEY, str(folder) if folder is not None else ""
+        )
+
+    def input_folder(self, scope: str) -> Path | None:
+        key = INPUT_FOLDER_KEYS.get(scope)
+        if key is None:
+            raise ValueError("不支持的素材导入位置")
+        value = self.database.get_setting(key, "")
+        if not value:
+            return None
+        folder = Path(value)
+        if folder.is_dir():
+            return folder
+        self.database.set_setting(key, "")
+        return None
+
+    def set_input_folder(self, scope: str, folder: Path | None) -> None:
+        key = INPUT_FOLDER_KEYS.get(scope)
+        if key is None:
+            raise ValueError("不支持的素材导入位置")
+        self.database.set_setting(
+            key,
+            str(Path(folder).resolve()) if folder is not None else "",
         )

@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..constants import APP_NAME, MODE_DRESS_UP, STATUS_LABELS
+from ..constants import APP_NAME, MODE_DRESS_UP, MODE_FREE_COMPOSE, STATUS_LABELS
 from ..database import Database
 from ..library import LibraryService
 from ..logging_utils import register_sensitive_value
@@ -162,7 +162,7 @@ class MainWindow(QMainWindow):
 
     def _open_retry(self, task_id: int) -> None:
         task = self.database.get_task(task_id)
-        if task and task["mode"] == MODE_DRESS_UP:
+        if task and task["mode"] in (MODE_DRESS_UP, MODE_FREE_COMPOSE):
             self.nav_list.setCurrentRow(1)
             self.batch_dress_page.prepare_retry(task_id)
             self.statusBar().showMessage(

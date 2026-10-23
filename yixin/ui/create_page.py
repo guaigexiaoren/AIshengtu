@@ -33,6 +33,7 @@ from ..constants import (
     DEFAULT_MODEL,
     DEFAULT_RESOLUTION,
     MODE_DRESS_UP,
+    MODE_FREE_COMPOSE,
     MODE_LABELS,
     MODE_REFERENCE,
     MODE_TEXT,
@@ -50,7 +51,7 @@ from ..library import LibraryService
 from ..local_export import LocalImageExporter
 from ..models import ImageRequest, StoredImage
 from ..security import SecretStore
-from ..settings import AppSettings
+from ..settings import AppSettings, INPUT_CREATE_REFERENCE
 from ..storage import FileStore, ImageValidationError
 from ..time_utils import format_task_elapsed
 from ..worker import TaskWorker
@@ -65,6 +66,7 @@ from .widgets import (
     ReorderableImageStrip,
     TaskImageAsset,
     build_task_assets,
+    scan_image_inputs,
 )
 
 TASK_DATA_ROLE = int(Qt.ItemDataRole.UserRole) + 1
@@ -186,11 +188,9 @@ class CreatePage(QWidget):
         self.template_combo = QComboBox()
         self.template_combo.setMinimumWidth(120)
         self.template_combo.addItem("选择提示词模板", None)
-        use_template = QPushButton("应用")
         save_template = QPushButton("保存当前")
         manage_template = QPushButton("管理")
         template_layout.addWidget(self.template_combo, 1)
-        template_layout.addWidget(use_template)
         template_layout.addWidget(save_template)
         template_layout.addWidget(manage_template)
         form.addRow("模板", template_row)
@@ -207,14 +207,26 @@ class CreatePage(QWidget):
         self.reference_group.setObjectName("Card")
         reference_layout = QVBoxLayout(self.reference_group)
         reference_buttons = QHBoxLayout()
-        reference_buttons.setSpacing(6)
-        add_local = QPushButton("添加本地图片")
+        reference_buttons.setSpacing(4)
+        add_local = QPushButton("添加图片")
+        add_folder = QPushButton("添加文件夹")
         add_library = QPushButton("从作品库添加")
         self.crop_reference_button = QPushButton("裁剪")
         self.restore_reference_button = QPushButton("恢复")
         remove_selected = QPushButton("移除所选")
         clear_all = QPushButton("清空")
+        for button in (
+            add_local,
+            add_folder,
+            add_library,
+            self.crop_reference_button,
+            self.restore_reference_button,
+            remove_selected,
+            clear_all,
+        ):
+            button.setStyleSheet("padding: 6px 8px;")
         reference_buttons.addWidget(add_local)
+        reference_buttons.addWidget(add_folder)
         reference_buttons.addWidget(add_library)
         reference_buttons.addWidget(self.crop_reference_button)
         reference_buttons.addWidget(self.restore_reference_button)
@@ -269,12 +281,13 @@ class CreatePage(QWidget):
         layout.addStretch(1)
 
         add_local.clicked.connect(self._add_local_references)
+        add_folder.clicked.connect(self._add_local_reference_folder)
         add_library.clicked.connect(self._add_library_references)
         remove_selected.clicked.connect(self._remove_selected_reference)
         clear_all.clicked.connect(self._clear_references)
         self.crop_reference_button.clicked.connect(self._crop_selected_reference)
         self.restore_reference_button.clicked.connect(self._restore_selected_reference)
-        use_template.clicked.connect(self._apply_template)
+        self.template_combo.currentIndexChanged.connect(self._apply_template)
         save_template.clicked.connect(self._quick_save_template)
         manage_template.clicked.connect(self._manage_templates)
         self.generate_button.clicked.connect(self._enqueue_generation)
@@ -400,27 +413,64 @@ class CreatePage(QWidget):
         if remaining <= 0:
             QMessageBox.information(self, "已达到上限", "参考图最多选择 14 张。")
             return
-        if len(source_paths) > remaining:
-            source_paths = source_paths[:remaining]
-            QMessageBox.information(
-                self, "已限制数量", f"本次只添加前 {remaining} 张，参考图最多 14 张。"
-            )
-        errors: list[str] = []
-        for path in source_paths:
+
+        paths, scan_errors = scan_image_inputs(source_paths)
+        known_hashes = {image.content_hash for image in self.reference_images}
+        errors = list(scan_errors)
+        added = 0
+        duplicate_count = 0
+        overflow = 0
+        for index, path in enumerate(paths):
+            if len(self.reference_images) >= 14:
+                overflow = len(paths) - index
+                break
             try:
-                self.reference_images.append(self.file_store.save_reference(path))
+                image = self.file_store.save_reference(path)
             except (OSError, ImageValidationError) as exc:
                 errors.append(f"{path.name}：{exc}")
+                continue
+            if image.content_hash in known_hashes:
+                duplicate_count += 1
+                continue
+            self.reference_images.append(image)
+            known_hashes.add(image.content_hash)
+            added += 1
         self._update_reference_list()
+        summary = [f"已添加 {added} 张参考图"]
+        if duplicate_count:
+            summary.append(f"跳过 {duplicate_count} 张重复图片")
+        if overflow:
+            summary.append(f"因 14 张上限未导入 {overflow} 张")
+        message = "，".join(summary) + "。"
         if errors:
-            QMessageBox.warning(self, "部分图片未添加", "\n".join(errors[:8]))
+            QMessageBox.warning(
+                self,
+                "部分图片未添加",
+                message + "\n\n" + "\n".join(errors[:8]),
+            )
+        elif duplicate_count or overflow:
+            QMessageBox.information(self, "添加结果", message)
+        elif not added:
+            QMessageBox.information(
+                self,
+                "没有可添加图片",
+                "所选位置中没有支持的新图片。",
+            )
 
     def _on_reference_files_dropped(self, paths: list[Path]) -> None:
         if not paths:
             return
+        self._remember_reference_input_folder(paths)
         if self.mode_combo.currentData() != MODE_REFERENCE:
             self.mode_combo.setCurrentIndex(1)
         self._add_stored_references(paths)
+
+    def _remember_reference_input_folder(self, paths: list[Path]) -> None:
+        if not paths:
+            return
+        first = Path(paths[0])
+        folder = first if first.is_dir() else first.parent
+        self.app_settings.set_input_folder(INPUT_CREATE_REFERENCE, folder)
 
     def _on_reference_order_changed(self, images: list[StoredImage]) -> None:
         if len(images) != len(self.reference_images):
@@ -538,14 +588,36 @@ class CreatePage(QWidget):
         if remaining <= 0:
             QMessageBox.information(self, "已达到上限", "参考图最多选择 14 张。")
             return
+        initial = self.app_settings.input_folder(INPUT_CREATE_REFERENCE)
         paths, _ = QFileDialog.getOpenFileNames(
             self,
             "选择参考图",
-            "",
+            str(initial) if initial else "",
             "图片 (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff);;所有文件 (*)",
         )
         if paths:
-            self._add_stored_references([Path(path) for path in paths[:remaining]])
+            selected = [Path(path) for path in paths]
+            self._remember_reference_input_folder(selected)
+            self._add_stored_references(selected)
+
+    def _add_local_reference_folder(self) -> None:
+        if self.mode_combo.currentData() != MODE_REFERENCE:
+            self.mode_combo.setCurrentIndex(1)
+        remaining = 14 - len(self.reference_images)
+        if remaining <= 0:
+            QMessageBox.information(self, "已达到上限", "参考图最多选择 14 张。")
+            return
+        initial = self.app_settings.input_folder(INPUT_CREATE_REFERENCE)
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "选择参考图文件夹",
+            str(initial) if initial else "",
+        )
+        if not directory:
+            return
+        folder = Path(directory)
+        self.app_settings.set_input_folder(INPUT_CREATE_REFERENCE, folder)
+        self._add_stored_references([folder])
 
     def _add_library_references(self) -> None:
         self.mode_combo.setCurrentIndex(1)
@@ -587,7 +659,7 @@ class CreatePage(QWidget):
         super().showEvent(event)
         self.refresh_templates()
 
-    def _apply_template(self) -> None:
+    def _apply_template(self, _index: int | None = None) -> None:
         template = self.template_combo.currentData()
         if template:
             self.prompt_edit.setPlainText(template["prompt"])
@@ -742,7 +814,7 @@ class CreatePage(QWidget):
         if model_index >= 0:
             self.model_combo.setCurrentIndex(model_index)
         mode_index = self.mode_combo.findData(task["mode"])
-        if mode_index < 0 and task["mode"] == MODE_DRESS_UP:
+        if mode_index < 0 and task["mode"] in (MODE_DRESS_UP, MODE_FREE_COMPOSE):
             mode_index = self.mode_combo.findData(MODE_REFERENCE)
         if mode_index >= 0:
             self.mode_combo.setCurrentIndex(mode_index)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,7 @@ from PySide6.QtGui import QDrag, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -38,6 +40,8 @@ from ..constants import (
     DEFAULT_RESOLUTION,
     MAX_BATCH_ASSETS,
     MODE_DRESS_UP,
+    MODE_FREE_COMPOSE,
+    MAX_REFERENCE_IMAGES,
     MODEL_OPTIONS,
     RESOLUTIONS,
 )
@@ -45,6 +49,7 @@ from ..database import Database
 from ..library import LibraryService
 from ..models import ImageRequest, StoredImage
 from ..security import SecretStore
+from ..settings import AppSettings, INPUT_BATCH_GARMENT, INPUT_BATCH_PERSON
 from ..storage import FileStore, ImageValidationError
 from ..worker import TaskWorker
 from .crop import CropDialog
@@ -64,16 +69,75 @@ ROLE_LABELS = {
     "garment": "服装",
     "person": "人物",
 }
+GROUP_KIND_LABELS = {
+    "manual": "配对",
+    "free": "自由组合",
+    "auto": "自动组",
+}
+
+
+def _drop_local_paths(mime) -> list[Path]:
+    if not mime.hasUrls():
+        return []
+    return [
+        Path(url.toLocalFile())
+        for url in mime.urls()
+        if url.isLocalFile()
+        and (Path(url.toLocalFile()).is_file() or Path(url.toLocalFile()).is_dir())
+    ]
 
 
 @dataclass(frozen=True)
-class DressPair:
-    garment: StoredImage
-    person: StoredImage
+class DressTaskGroup:
+    references: tuple[StoredImage, ...]
+    roles: tuple[str, ...]
+    kind: str
+    auto_prompt: bool = True
 
     @property
-    def key(self) -> tuple[str, str]:
-        return (self.garment.content_hash, self.person.content_hash)
+    def key(self) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (role, image.content_hash)
+            for role, image in zip(self.roles, self.references)
+        )
+
+    @property
+    def garment(self) -> StoredImage:
+        return next(
+            (
+                image
+                for role, image in zip(self.roles, self.references)
+                if role == "garment"
+            ),
+            self.references[0],
+        )
+
+    @property
+    def person(self) -> StoredImage:
+        return next(
+            (
+                image
+                for role, image in zip(self.roles, self.references)
+                if role == "person"
+            ),
+            self.references[-1],
+        )
+
+    @property
+    def garment_count(self) -> int:
+        return self.roles.count("garment")
+
+    @classmethod
+    def manual(cls, garment: StoredImage, person: StoredImage) -> DressTaskGroup:
+        return cls(
+            references=(garment, person),
+            roles=("garment", "person"),
+            kind="manual",
+            auto_prompt=False,
+        )
+
+
+DressPair = DressTaskGroup
 
 
 class BatchAssetList(QListWidget):
@@ -100,6 +164,8 @@ class BatchAssetList(QListWidget):
         self._drag_start: QPoint | None = None
         self._drag_row: int | None = None
         self._drag_active = False
+        self.viewport().installEventFilter(self)
+        self.installEventFilter(self)
 
     def refresh_assets(self, assets: Sequence[StoredImage]) -> None:
         selected_hash = None
@@ -243,13 +309,242 @@ class BatchAssetList(QListWidget):
         else:
             self.setStyleSheet("")
 
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self or watched is self.viewport():
+            if event.type() in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
+                if _drop_local_paths(event.mimeData()):
+                    self._set_drop_highlight(True)
+                    event.acceptProposedAction()
+                    return True
+            elif event.type() == QEvent.Type.Drop:
+                paths = _drop_local_paths(event.mimeData())
+                self._set_drop_highlight(False)
+                if paths:
+                    self.files_dropped.emit(paths)
+                    event.acceptProposedAction()
+                    return True
+            elif event.type() == QEvent.Type.DragLeave:
+                self._set_drop_highlight(False)
+        return super().eventFilter(watched, event)
+
+
+class BatchAssetDropGroup(QGroupBox):
+    files_dropped = Signal(list)
+
+    def dragEnterEvent(self, event) -> None:
+        if _drop_local_paths(event.mimeData()):
+            self.setStyleSheet(
+                "QGroupBox { border:2px solid #3f73cb; border-radius:10px;"
+                " background:#edf4ff; }"
+            )
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if _drop_local_paths(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:
+        self.setStyleSheet("")
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:
+        paths = _drop_local_paths(event.mimeData())
+        self.setStyleSheet("")
+        if not paths:
+            event.ignore()
+            return
+        self.files_dropped.emit(paths)
+        event.acceptProposedAction()
+
+
+class FreeComposeDialog(QDialog):
+    def __init__(
+        self,
+        garment_assets: Sequence[StoredImage],
+        person_assets: Sequence[StoredImage],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("自由组合参考图")
+        self.resize(920, 620)
+        layout = QVBoxLayout(self)
+        tip = QLabel(
+            "从服装和人物素材中任选图片，按右侧顺序发送给模型。最多 14 张。"
+        )
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+        content = QHBoxLayout()
+
+        available_host = QGroupBox("可用素材")
+        available_layout = QVBoxLayout(available_host)
+        self.available_list = QListWidget()
+        self.available_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.available_list.setIconSize(QSize(76, 76))
+        self.available_list.setGridSize(QSize(120, 120))
+        self.available_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.available_list.setMovement(QListWidget.Movement.Static)
+        self.available_list.setSelectionMode(
+            QListWidget.SelectionMode.ExtendedSelection
+        )
+        for role, assets in (
+            ("garment", garment_assets),
+            ("person", person_assets),
+        ):
+            for index, image in enumerate(assets, start=1):
+                item = QListWidgetItem(
+                    f"{ROLE_LABELS[role]} {index}\n{image.original_name}"
+                )
+                pixmap = load_scaled_pixmap(image.path, QSize(74, 74))
+                if not pixmap.isNull():
+                    item.setIcon(QIcon(pixmap))
+                item.setData(Qt.ItemDataRole.UserRole, (role, image))
+                item.setToolTip(f"{ROLE_LABELS[role]}：{image.original_name}")
+                self.available_list.addItem(item)
+        available_layout.addWidget(self.available_list)
+        add_button = QPushButton("加入组合 →")
+        add_button.setObjectName("PrimaryButton")
+        available_layout.addWidget(add_button)
+        content.addWidget(available_host, 1)
+
+        selected_host = QGroupBox("当前组合（按顺序发送）")
+        selected_layout = QVBoxLayout(selected_host)
+        self.selected_list = QListWidget()
+        self.selected_list.setIconSize(QSize(38, 38))
+        self.selected_list.setSelectionMode(
+            QListWidget.SelectionMode.SingleSelection
+        )
+        selected_layout.addWidget(self.selected_list, 1)
+        count = QLabel("已选择 0 / 14 张")
+        self.count_label = count
+        selected_layout.addWidget(count)
+        sort_row = QHBoxLayout()
+        move_up = QPushButton("上移")
+        move_down = QPushButton("下移")
+        remove = QPushButton("移除")
+        sort_row.addWidget(move_up)
+        sort_row.addWidget(move_down)
+        sort_row.addWidget(remove)
+        sort_row.addStretch(1)
+        selected_layout.addLayout(sort_row)
+        content.addWidget(selected_host, 1)
+        layout.addLayout(content, 1)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        cancel = QPushButton("取消")
+        create = QPushButton("创建组合")
+        create.setObjectName("PrimaryButton")
+        footer.addWidget(cancel)
+        footer.addWidget(create)
+        layout.addLayout(footer)
+
+        add_button.clicked.connect(self._add_selected)
+        self.available_list.itemDoubleClicked.connect(
+            lambda _item: self._add_selected()
+        )
+        move_up.clicked.connect(lambda: self._move_selected(-1))
+        move_down.clicked.connect(lambda: self._move_selected(1))
+        remove.clicked.connect(self._remove_selected)
+        cancel.clicked.connect(self.reject)
+        create.clicked.connect(self._create)
+
+    def _add_selected(self) -> None:
+        selected_rows = sorted(
+            self.available_list.row(item)
+            for item in self.available_list.selectedItems()
+        )
+        if not selected_rows:
+            return
+        known_hashes = {
+            self.selected_list.item(row)
+            .data(Qt.ItemDataRole.UserRole)[1]
+            .content_hash
+            for row in range(self.selected_list.count())
+        }
+        added = 0
+        skipped_duplicate = 0
+        skipped_limit = 0
+        for row in selected_rows:
+            if self.selected_list.count() >= MAX_REFERENCE_IMAGES:
+                skipped_limit += 1
+                continue
+            role, image = self.available_list.item(row).data(
+                Qt.ItemDataRole.UserRole
+            )
+            if image.content_hash in known_hashes:
+                skipped_duplicate += 1
+                continue
+            item = QListWidgetItem(
+                f"{ROLE_LABELS[role]}：{image.original_name}"
+            )
+            pixmap = load_scaled_pixmap(image.path, QSize(36, 36))
+            if not pixmap.isNull():
+                item.setIcon(QIcon(pixmap))
+            item.setData(Qt.ItemDataRole.UserRole, (role, image))
+            item.setToolTip(f"{ROLE_LABELS[role]}：{image.original_name}")
+            self.selected_list.addItem(item)
+            known_hashes.add(image.content_hash)
+            added += 1
+        if self.selected_list.count():
+            self.selected_list.setCurrentRow(self.selected_list.count() - 1)
+        self._update_count()
+        if skipped_duplicate or skipped_limit:
+            messages = []
+            if skipped_duplicate:
+                messages.append(f"跳过 {skipped_duplicate} 张重复图片")
+            if skipped_limit:
+                messages.append(f"因 14 张上限忽略 {skipped_limit} 张")
+            QMessageBox.information(
+                self,
+                "组合结果",
+                f"已加入 {added} 张，" + "，".join(messages) + "。",
+            )
+
+    def _move_selected(self, offset: int) -> None:
+        row = self.selected_list.currentRow()
+        target = row + offset
+        if not 0 <= row < self.selected_list.count():
+            return
+        if not 0 <= target < self.selected_list.count():
+            return
+        item = self.selected_list.takeItem(row)
+        self.selected_list.insertItem(target, item)
+        self.selected_list.setCurrentRow(target)
+
+    def _remove_selected(self) -> None:
+        row = self.selected_list.currentRow()
+        if row >= 0:
+            self.selected_list.takeItem(row)
+            self._update_count()
+
+    def _update_count(self) -> None:
+        self.count_label.setText(
+            f"已选择 {self.selected_list.count()} / {MAX_REFERENCE_IMAGES} 张"
+        )
+
+    def selected_items(self) -> list[tuple[str, StoredImage]]:
+        return [
+            self.selected_list.item(row).data(Qt.ItemDataRole.UserRole)
+            for row in range(self.selected_list.count())
+        ]
+
+    def _create(self) -> None:
+        if not self.selected_list.count():
+            QMessageBox.information(self, "组合为空", "请至少加入一张图片。")
+            return
+        self.accept()
+
 
 class DressPairCard(QFrame):
     remove_requested = Signal(object)
 
     def __init__(
         self,
-        pair: DressPair,
+        pair: DressTaskGroup,
         position: int,
         parent: QWidget | None = None,
     ) -> None:
@@ -267,7 +562,7 @@ class DressPairCard(QFrame):
         layout.setSpacing(5)
 
         header = QHBoxLayout()
-        order = QLabel(f"配对 {position}")
+        order = QLabel(f"{GROUP_KIND_LABELS.get(pair.kind, '任务组')} {position}")
         order.setStyleSheet("font-weight:700;color:#2e64c4;")
         remove = QPushButton("移除")
         remove.setObjectName("DangerButton")
@@ -278,14 +573,38 @@ class DressPairCard(QFrame):
         header.addWidget(remove)
         layout.addLayout(header)
 
+        reference_lines = [
+            f"{index}. {ROLE_LABELS.get(role, role)}：{image.original_name}"
+            for index, (role, image) in enumerate(
+                zip(pair.roles, pair.references),
+                start=1,
+            )
+        ]
+        self.setToolTip("\n".join(reference_lines))
         body = QHBoxLayout()
         body.setSpacing(5)
         body.addStretch(1)
-        body.addWidget(self._image_block(pair.garment, "服装"))
-        arrow = QLabel("→")
-        arrow.setStyleSheet("font-size:19px;color:#2e64c4;font-weight:700;")
-        body.addWidget(arrow)
-        body.addWidget(self._image_block(pair.person, "人物"))
+        if pair.kind == "manual":
+            body.addWidget(self._image_block(pair.garment, "服装"))
+            arrow = QLabel("→")
+            arrow.setStyleSheet("font-size:19px;color:#2e64c4;font-weight:700;")
+            body.addWidget(arrow)
+            body.addWidget(self._image_block(pair.person, "人物"))
+        elif pair.kind == "auto":
+            garments = tuple(
+                image
+                for role, image in zip(pair.roles, pair.references)
+                if role == "garment"
+            )
+            body.addWidget(self._cluster_block(garments, "服装"))
+            arrow = QLabel("→")
+            arrow.setStyleSheet("font-size:19px;color:#2e64c4;font-weight:700;")
+            body.addWidget(arrow)
+            body.addWidget(self._image_block(pair.person, "人物"))
+        else:
+            body.addWidget(
+                self._cluster_block(pair.references, "参考", pair.roles)
+            )
         body.addStretch(1)
         layout.addLayout(body)
 
@@ -320,6 +639,53 @@ class DressPairCard(QFrame):
         layout.addWidget(name)
         return block
 
+    @staticmethod
+    def _cluster_block(
+        images: Sequence[StoredImage],
+        label: str,
+        roles: Sequence[str] | None = None,
+    ) -> QWidget:
+        block = QWidget()
+        block.setFixedWidth(96)
+        layout = QVBoxLayout(block)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        title_text = (
+            f"参考×{len(images)}"
+            if label == "参考"
+            else f"{label}×{len(images)}"
+        )
+        title = QLabel(title_text)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("color:#60708a;font-size:11px;font-weight:600;")
+        thumbs = QHBoxLayout()
+        thumbs.setSpacing(2)
+        for index, image in enumerate(images[:3]):
+            preview = QLabel()
+            preview.setFixedSize(24, 48)
+            preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            pixmap = load_scaled_pixmap(image.path, QSize(22, 44))
+            if not pixmap.isNull():
+                preview.setPixmap(pixmap)
+            preview.setToolTip(
+                f"{ROLE_LABELS.get(roles[index], roles[index]) if roles else label}"
+                f"：{image.original_name}"
+            )
+            thumbs.addWidget(preview)
+        if len(images) > 3:
+            more = QLabel(f"+{len(images) - 3}")
+            more.setFixedWidth(18)
+            more.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            more.setStyleSheet(
+                "color:#2e64c4;background:#e6eefe;border-radius:5px;"
+                "padding:2px;font-weight:700;"
+            )
+            thumbs.addWidget(more)
+        thumbs.addStretch(1)
+        layout.addWidget(title)
+        layout.addLayout(thumbs)
+        return block
+
 
 class BatchDressPage(QWidget):
     settings_requested = Signal()
@@ -341,9 +707,10 @@ class BatchDressPage(QWidget):
         self.library_service = library_service
         self.worker = worker
         self.secret_store = secret_store
+        self.app_settings = AppSettings(database)
         self.garment_assets: list[StoredImage] = []
         self.person_assets: list[StoredImage] = []
-        self.pairs: list[DressPair] = []
+        self.pairs: list[DressTaskGroup] = []
         self.selected_garment: StoredImage | None = None
         self.pair_columns = 4
         self._pair_layout_pending = False
@@ -473,13 +840,11 @@ class BatchDressPage(QWidget):
         self.template_combo = QComboBox()
         self.template_combo.setMinimumWidth(110)
         self.template_combo.addItem("选择提示词模板", None)
-        apply_template = QPushButton("应用")
         save_template = QPushButton("保存当前")
         manage_templates = QPushButton("管理")
-        for button in (apply_template, save_template, manage_templates):
+        for button in (save_template, manage_templates):
             button.setStyleSheet("padding: 5px 8px;")
         template_row.addWidget(self.template_combo, 1)
-        template_row.addWidget(apply_template)
         template_row.addWidget(save_template)
         template_row.addWidget(manage_templates)
         layout.addLayout(template_row)
@@ -492,7 +857,7 @@ class BatchDressPage(QWidget):
             "保持人物身份和姿态，准确还原服装颜色、材质与纹理。"
         )
         layout.addWidget(self.prompt_edit)
-        apply_template.clicked.connect(self._apply_template)
+        self.template_combo.currentIndexChanged.connect(self._apply_template)
         save_template.clicked.connect(self._quick_save_template)
         manage_templates.clicked.connect(self._manage_templates)
         return card
@@ -519,7 +884,7 @@ class BatchDressPage(QWidget):
                     break
         self.template_combo.blockSignals(False)
 
-    def _apply_template(self) -> None:
+    def _apply_template(self, _index: int | None = None) -> None:
         template = self.template_combo.currentData()
         if template:
             self.prompt_edit.setPlainText(template["prompt"])
@@ -585,8 +950,11 @@ class BatchDressPage(QWidget):
         return host
 
     def _make_asset_group(self, role: str) -> tuple[QWidget, BatchAssetList]:
-        group = QGroupBox(f"{ROLE_LABELS[role]}素材（最多 {MAX_BATCH_ASSETS} 张）")
+        group = BatchAssetDropGroup(
+            f"{ROLE_LABELS[role]}素材（最多 {MAX_BATCH_ASSETS} 张）"
+        )
         group.setObjectName("Card")
+        group.setAcceptDrops(True)
         layout = QVBoxLayout(group)
         buttons = QHBoxLayout()
         buttons.setSpacing(4)
@@ -639,6 +1007,9 @@ class BatchDressPage(QWidget):
         restore.clicked.connect(lambda: self._restore_selected(role))
         remove.clicked.connect(lambda: self._remove_selected(role))
         clear.clicked.connect(lambda: self._clear_role(role))
+        group.files_dropped.connect(
+            lambda paths: self._append_assets(role, paths)
+        )
         crop.setEnabled(False)
         restore.setEnabled(False)
         return group, asset_list
@@ -650,9 +1021,13 @@ class BatchDressPage(QWidget):
         top = QHBoxLayout()
         self.pair_count_label = QLabel("已建立 0 个配对")
         self.pair_count_label.setStyleSheet("color:#2e64c4;font-weight:600;")
+        self.free_compose_button = QPushButton("自由组合")
+        self.auto_match_button = QPushButton("自动匹配")
         clear_pairs = QPushButton("清空配对")
         top.addWidget(self.pair_count_label)
         top.addStretch(1)
+        top.addWidget(self.free_compose_button)
+        top.addWidget(self.auto_match_button)
         top.addWidget(clear_pairs)
         layout.addLayout(top)
 
@@ -673,6 +1048,8 @@ class BatchDressPage(QWidget):
         layout.addWidget(self.pair_scroll, 1)
         group.setMinimumHeight(260)
         group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.free_compose_button.clicked.connect(self._free_compose)
+        self.auto_match_button.clicked.connect(self._auto_match)
         clear_pairs.clicked.connect(self._clear_pairs)
         self._refresh_pairs()
         return group
@@ -838,13 +1215,20 @@ class BatchDressPage(QWidget):
         if role == "garment" and self.selected_garment == previous:
             self.selected_garment = candidate
         self.pairs = [
-            DressPair(
-                garment=candidate if role == "garment" else pair.garment,
-                person=candidate if role == "person" else pair.person,
+            DressTaskGroup(
+                references=tuple(
+                    candidate
+                    if reference == previous and reference_role == role
+                    else reference
+                    for reference_role, reference in zip(pair.roles, pair.references)
+                ),
+                roles=pair.roles,
+                kind=pair.kind,
+                auto_prompt=pair.auto_prompt,
             )
-            if (
-                (role == "garment" and pair.garment == previous)
-                or (role == "person" and pair.person == previous)
+            if any(
+                reference_role == role and reference == previous
+                for reference_role, reference in zip(pair.roles, pair.references)
             )
             else pair
             for pair in self.pairs
@@ -857,7 +1241,20 @@ class BatchDressPage(QWidget):
         )
         return True
 
-    def _append_assets(self, role: str, inputs: Sequence[Path]) -> None:
+    def _append_assets(
+        self,
+        role: str,
+        inputs: Sequence[Path],
+        *,
+        remember_path: bool = True,
+    ) -> None:
+        if remember_path and inputs:
+            first = Path(inputs[0])
+            folder = first if first.is_dir() else first.parent
+            self.app_settings.set_input_folder(
+                INPUT_BATCH_GARMENT if role == "garment" else INPUT_BATCH_PERSON,
+                folder,
+            )
         assets = self._assets_for(role)
         remaining = MAX_BATCH_ASSETS - len(assets)
         if remaining <= 0:
@@ -916,19 +1313,24 @@ class BatchDressPage(QWidget):
                 f"{ROLE_LABELS[role]}素材最多 {MAX_BATCH_ASSETS} 张。",
             )
             return
+        scope = INPUT_BATCH_GARMENT if role == "garment" else INPUT_BATCH_PERSON
+        initial = self.app_settings.input_folder(scope)
         paths, _ = QFileDialog.getOpenFileNames(
             self,
             f"选择{ROLE_LABELS[role]}图片",
-            "",
+            str(initial) if initial else "",
             "图片 (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff);;所有文件 (*)",
         )
         if paths:
             self._append_assets(role, [Path(path) for path in paths])
 
     def _add_image_folder(self, role: str) -> None:
+        scope = INPUT_BATCH_GARMENT if role == "garment" else INPUT_BATCH_PERSON
+        initial = self.app_settings.input_folder(scope)
         directory = QFileDialog.getExistingDirectory(
             self,
             f"选择{ROLE_LABELS[role]}文件夹",
+            str(initial) if initial else "",
         )
         if directory:
             self._append_assets(role, [Path(directory)])
@@ -945,7 +1347,11 @@ class BatchDressPage(QWidget):
         dialog = LibraryPickerDialog(self.database, remaining, self)
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
-        self._append_assets(role, dialog.selected_paths())
+        self._append_assets(
+            role,
+            dialog.selected_paths(),
+            remember_path=False,
+        )
 
     def _remove_selected(self, role: str) -> None:
         asset_list = self._asset_list_for(role)
@@ -969,31 +1375,31 @@ class BatchDressPage(QWidget):
         assets = self._assets_for(role)
         if not assets:
             return
+        asset_hashes = {asset.content_hash for asset in assets}
         related_count = sum(
             1
             for pair in self.pairs
-            if (role == "garment" and pair.garment in assets)
-            or (role == "person" and pair.person in assets)
+            if any(
+                reference_role == role and reference.content_hash in asset_hashes
+                for reference_role, reference in zip(pair.roles, pair.references)
+            )
         )
         if related_count and not self._confirm_pair_removal(
             f"清空后将同时删除 {related_count} 个相关配对。"
         ):
             return
-        asset_hashes = {asset.content_hash for asset in assets}
         assets.clear()
+        self.pairs = [
+            pair
+            for pair in self.pairs
+            if not any(
+                reference_role == role
+                and reference.content_hash in asset_hashes
+                for reference_role, reference in zip(pair.roles, pair.references)
+            )
+        ]
         if role == "garment":
-            self.pairs = [
-                pair
-                for pair in self.pairs
-                if pair.garment.content_hash not in asset_hashes
-            ]
             self.selected_garment = None
-        else:
-            self.pairs = [
-                pair
-                for pair in self.pairs
-                if pair.person.content_hash not in asset_hashes
-            ]
         self._refresh_role(role)
         self._refresh_pairs()
 
@@ -1007,16 +1413,29 @@ class BatchDressPage(QWidget):
         )
         return answer == QMessageBox.StandardButton.Yes
 
-    def _pairs_for_image(self, role: str, image: StoredImage) -> list[DressPair]:
-        if role == "garment":
-            return [pair for pair in self.pairs if pair.garment == image]
-        return [pair for pair in self.pairs if pair.person == image]
+    def _pairs_for_image(
+        self,
+        role: str,
+        image: StoredImage,
+    ) -> list[DressTaskGroup]:
+        return [
+            pair
+            for pair in self.pairs
+            if any(
+                reference_role == role and reference == image
+                for reference_role, reference in zip(pair.roles, pair.references)
+            )
+        ]
 
     def _remove_related_pairs(self, role: str, image: StoredImage) -> None:
-        if role == "garment":
-            self.pairs = [pair for pair in self.pairs if pair.garment != image]
-        else:
-            self.pairs = [pair for pair in self.pairs if pair.person != image]
+        self.pairs = [
+            pair
+            for pair in self.pairs
+            if not any(
+                reference_role == role and reference == image
+                for reference_role, reference in zip(pair.roles, pair.references)
+            )
+        ]
 
     def _garment_selection_changed(
         self,
@@ -1062,8 +1481,94 @@ class BatchDressPage(QWidget):
             return
         self._add_pair(garment, self.person_assets[person_row])
 
+    def _free_compose(self) -> None:
+        if not self.garment_assets and not self.person_assets:
+            QMessageBox.information(
+                self,
+                "没有可用素材",
+                "请先上传服装或人物素材。",
+            )
+            return
+        dialog = FreeComposeDialog(
+            self.garment_assets,
+            self.person_assets,
+            self,
+        )
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        selected = dialog.selected_items()
+        if not selected:
+            return
+        group = DressTaskGroup(
+            references=tuple(image for _, image in selected),
+            roles=tuple(role for role, _ in selected),
+            kind="free",
+            auto_prompt=True,
+        )
+        if any(existing.key == group.key for existing in self.pairs):
+            self.feedback_label.setText("完全相同的自由组合已经存在。")
+            return
+        self.pairs.append(group)
+        self.feedback_label.setText(
+            f"已添加自由组合，共 {len(group.references)} 张参考图。"
+        )
+        self._refresh_pairs()
+
+    def _auto_match(self) -> None:
+        if not self.garment_assets:
+            QMessageBox.information(
+                self,
+                "缺少服装素材",
+                "请先上传至少一张服装图片。",
+            )
+            return
+        if not self.person_assets:
+            QMessageBox.information(
+                self,
+                "缺少人物素材",
+                "请先上传至少一张人物图片。",
+            )
+            return
+        if self.pairs:
+            answer = QMessageBox.question(
+                self,
+                "替换现有配对",
+                f"自动匹配将替换当前 {len(self.pairs)} 个配对，"
+                "已上传素材不会删除。\n确定继续吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        garment_chunk_size = MAX_REFERENCE_IMAGES - 1
+        groups: list[DressTaskGroup] = []
+        for person in self.person_assets:
+            for start in range(0, len(self.garment_assets), garment_chunk_size):
+                garments = tuple(
+                    self.garment_assets[start : start + garment_chunk_size]
+                )
+                groups.append(
+                    DressTaskGroup(
+                        references=(*garments, person),
+                        roles=("garment",) * len(garments) + ("person",),
+                        kind="auto",
+                        auto_prompt=True,
+                    )
+                )
+        if not groups:
+            return
+        self.pairs = groups
+        self._reset_pair_selection()
+        self._refresh_pairs()
+        split_count = (len(self.garment_assets) + garment_chunk_size - 1) // garment_chunk_size
+        split_hint = f"，每位人物拆为 {split_count} 组" if split_count > 1 else ""
+        self.feedback_label.setText(
+            f"自动匹配已生成 {len(groups)} 组{split_hint}。"
+        )
+
     def _add_pair(self, garment: StoredImage, person: StoredImage) -> None:
-        pair = DressPair(garment=garment, person=person)
+        pair = DressTaskGroup.manual(garment, person)
         if any(existing.key == pair.key for existing in self.pairs):
             self.feedback_label.setText("这组“服装 × 人物”已经配对，无需重复添加。")
             self._reset_pair_selection()
@@ -1088,7 +1593,7 @@ class BatchDressPage(QWidget):
         self.person_list.blockSignals(False)
         self._update_asset_actions()
 
-    def _remove_pair(self, pair: DressPair) -> None:
+    def _remove_pair(self, pair: DressTaskGroup) -> None:
         self.pairs = [item for item in self.pairs if item.key != pair.key]
         self._refresh_pairs()
 
@@ -1170,18 +1675,23 @@ class BatchDressPage(QWidget):
         if answer != QMessageBox.StandardButton.Yes:
             return
 
-        requests = [
-            ImageRequest(
-                model=self.model_combo.currentData(),
-                prompt=prompt,
-                n=count,
-                aspect_ratio=self.aspect_combo.currentData(),
-                resolution=self.resolution_combo.currentData(),
-                reference_images=(pair.garment, pair.person),
-                mode=MODE_DRESS_UP,
+        requests = []
+        for group in self.pairs:
+            requests.append(
+                ImageRequest(
+                    model=self.model_combo.currentData(),
+                    prompt=self._prompt_for_group(prompt, group),
+                    n=count,
+                    aspect_ratio=self.aspect_combo.currentData(),
+                    resolution=self.resolution_combo.currentData(),
+                    reference_images=group.references,
+                    mode=(
+                        MODE_FREE_COMPOSE
+                        if group.kind == "free"
+                        else MODE_DRESS_UP
+                    ),
+                )
             )
-            for pair in self.pairs
-        ]
         try:
             task_ids = self.database.create_tasks(requests)
         except Exception as exc:
@@ -1204,22 +1714,64 @@ class BatchDressPage(QWidget):
             "可在“创作”的任务队列或“历史记录”中查看结果。",
         )
 
+    @staticmethod
+    def _prompt_for_group(user_prompt: str, group: DressTaskGroup) -> str:
+        if not group.auto_prompt:
+            return user_prompt
+        if group.kind == "auto":
+            garment_count = group.garment_count
+            if garment_count == 1:
+                context = (
+                    "自动匹配：第 1 张为服装参考，第 2 张为人物参考。"
+                )
+            else:
+                context = (
+                    f"自动匹配：第 1 至第 {garment_count} 张为服装参考，"
+                    f"第 {garment_count + 1} 张为人物参考。"
+                )
+        else:
+            descriptions = "，".join(
+                f"第 {index} 张为{ROLE_LABELS.get(role, role)}素材"
+                for index, role in enumerate(group.roles, start=1)
+            )
+            context = f"自由组合：{descriptions}。"
+        return f"{context}\n{user_prompt}"
+
     def prepare_retry(self, task_id: int) -> None:
         task = self.database.get_task(task_id)
-        if task is None or task["mode"] != MODE_DRESS_UP:
+        if task is None or task["mode"] not in (MODE_DRESS_UP, MODE_FREE_COMPOSE):
             return
         references = self.database.get_task_references(task_id)
-        if len(references) != 2:
+        if not references:
             return
-
-        self.garment_assets = [references[0]]
-        self.person_assets = [references[1]]
-        self.pairs = [DressPair(references[0], references[1])]
+        user_prompt, kind, roles = self._retry_group_data(
+            task["mode"],
+            task["prompt"],
+            len(references),
+        )
+        self.garment_assets = [
+            image
+            for role, image in zip(roles, references)
+            if role == "garment"
+        ]
+        self.person_assets = [
+            image
+            for role, image in zip(roles, references)
+            if role == "person"
+        ]
+        self.pairs = [
+            DressTaskGroup(
+                references=tuple(references),
+                roles=roles,
+                kind=kind,
+                auto_prompt=kind in ("auto", "free"),
+            )
+        ]
         self.selected_garment = None
         self._refresh_role("garment")
         self._refresh_role("person")
         self._refresh_pairs()
-        self.prompt_edit.setPlainText(task["prompt"])
+        self.prompt_edit.setPlainText(user_prompt)
         model_index = self.model_combo.findData(task["model"])
         if model_index >= 0:
             self.model_combo.setCurrentIndex(model_index)
@@ -1234,3 +1786,51 @@ class BatchDressPage(QWidget):
             f"已载入任务 #{task_id}，修改提示词或参数后重新生成。"
         )
         self.prompt_edit.setFocus()
+
+    @staticmethod
+    def _retry_group_data(
+        mode: str,
+        prompt: str,
+        reference_count: int,
+    ) -> tuple[str, str, tuple[str, ...]]:
+        first_line, separator, remainder = prompt.partition("\n")
+        if mode == MODE_FREE_COMPOSE and first_line.startswith("自由组合："):
+            matches = re.findall(
+                r"第 (\d+) 张为(服装|人物)素材",
+                first_line,
+            )
+            if len(matches) == reference_count and separator:
+                roles = tuple(
+                    "garment" if label == "服装" else "person"
+                    for _, label in matches
+                )
+                return remainder, "free", roles
+            return prompt, "free", ("garment",) * reference_count
+
+        if mode == MODE_DRESS_UP and first_line.startswith("自动匹配："):
+            match = re.match(
+                r"自动匹配：第 1 至第 (\d+) 张为服装参考，第 (\d+) 张为人物参考。",
+                first_line,
+            )
+            single_match = re.match(
+                r"自动匹配：第 1 张为服装参考，第 2 张为人物参考。",
+                first_line,
+            )
+            if separator and match:
+                garment_count = int(match.group(1))
+                if garment_count + 1 == reference_count:
+                    return (
+                        remainder,
+                        "auto",
+                        ("garment",) * garment_count + ("person",),
+                    )
+            if separator and single_match and reference_count == 2:
+                return remainder, "auto", ("garment", "person")
+
+        if reference_count == 2:
+            return prompt, "manual", ("garment", "person")
+        return (
+            prompt,
+            "auto",
+            ("garment",) * (reference_count - 1) + ("person",),
+        )

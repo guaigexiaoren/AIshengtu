@@ -9,21 +9,34 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl
-from PySide6.QtGui import QDropEvent
+from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+)
 
 from tests.helpers import make_image
-from yixin.constants import MODE_DRESS_UP, TASK_SUCCESS
+from yixin.constants import (
+    BUILTIN_PROMPT_TEMPLATES,
+    MODE_DRESS_UP,
+    MODE_FREE_COMPOSE,
+    TASK_SUCCESS,
+)
 from yixin.database import Database
 from yixin.library import LibraryService
 from yixin.models import ImageRequest
 from yixin.paths import AppPaths
 from yixin.security import SecretStore
+from yixin.settings import INPUT_BATCH_GARMENT, INPUT_BATCH_PERSON, AppSettings
 from yixin.storage import FileStore
 from yixin.ui.batch_dress_page import (
     DRESS_UP_MIME,
-    DressPair,
+    FreeComposeDialog,
+    DressTaskGroup,
     PAIR_CARD_GAP,
     PAIR_CARD_MIN_WIDTH,
     natural_sort_key,
@@ -140,6 +153,85 @@ class BatchDressTests(unittest.TestCase):
             [image.original_name for image in self.page.person_assets],
             ["2.png", "1.png"],
         )
+        settings = AppSettings(self.database)
+        self.assertEqual(settings.input_folder(INPUT_BATCH_GARMENT), garment_root)
+        self.assertEqual(settings.input_folder(INPUT_BATCH_PERSON), person_root)
+
+    def test_external_folder_drop_works_on_list_viewport_and_asset_group(
+        self,
+    ) -> None:
+        self.window.nav_list.setCurrentRow(1)
+        self.window.show()
+        self.app.processEvents()
+        garment_root = Path(self.temp.name) / "viewport服装"
+        garment_root.mkdir()
+        make_image(garment_root / "1.png", (20, 60, 80))
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(garment_root))])
+        enter_event = QDragEnterEvent(
+            QPoint(8, 8),
+            Qt.DropAction.CopyAction,
+            mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        self.app.sendEvent(self.page.garment_list.viewport(), enter_event)
+        move_event = QDragMoveEvent(
+            QPoint(8, 8),
+            Qt.DropAction.CopyAction,
+            mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        self.app.sendEvent(self.page.garment_list.viewport(), move_event)
+        event = QDropEvent(
+            QPointF(8, 8),
+            Qt.DropAction.CopyAction,
+            mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        self.app.sendEvent(self.page.garment_list.viewport(), event)
+        self.app.processEvents()
+        self.assertEqual(
+            [image.original_name for image in self.page.garment_assets],
+            ["1.png"],
+        )
+
+        person_root = Path(self.temp.name) / "group人物"
+        person_root.mkdir()
+        make_image(person_root / "2.png", (90, 40, 30))
+        group_mime = QMimeData()
+        group_mime.setUrls([QUrl.fromLocalFile(str(person_root))])
+        group_enter = QDragEnterEvent(
+            QPoint(8, 8),
+            Qt.DropAction.CopyAction,
+            group_mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        self.app.sendEvent(self.page.person_group, group_enter)
+        group_move = QDragMoveEvent(
+            QPoint(8, 8),
+            Qt.DropAction.CopyAction,
+            group_mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        self.app.sendEvent(self.page.person_group, group_move)
+        group_event = QDropEvent(
+            QPointF(8, 8),
+            Qt.DropAction.CopyAction,
+            group_mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        self.app.sendEvent(self.page.person_group, group_event)
+        self.app.processEvents()
+        self.assertEqual(
+            [image.original_name for image in self.page.person_assets],
+            ["2.png"],
+        )
 
     def test_garment_mouse_drag_starts_copy_payload(self) -> None:
         self.page._append_assets(
@@ -255,6 +347,300 @@ class BatchDressTests(unittest.TestCase):
             self.page.person_assets[1],
         )
         self.assertEqual(len(self.page.pairs), 2)
+
+    def test_auto_match_creates_one_group_per_person_and_replaces_existing(
+        self,
+    ) -> None:
+        garments = [
+            self._image(f"自动服装{index}.png", (20 + index * 20, 50, 80))
+            for index in range(3)
+        ]
+        people = [
+            self._image(f"自动人物{index}.png", (100, 30 + index * 20, 20))
+            for index in range(5)
+        ]
+        self.page._append_assets("garment", garments)
+        self.page._append_assets("person", people)
+        self.page._add_pair(
+            self.page.garment_assets[0],
+            self.page.person_assets[0],
+        )
+        with patch(
+            "yixin.ui.batch_dress_page.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.No,
+        ):
+            self.page._auto_match()
+        self.assertEqual(len(self.page.pairs), 1)
+        self.assertEqual(self.page.pairs[0].kind, "manual")
+
+        with patch(
+            "yixin.ui.batch_dress_page.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ):
+            self.page._auto_match()
+        self.assertEqual(len(self.page.pairs), 5)
+        for index, group in enumerate(self.page.pairs):
+            self.assertEqual(group.kind, "auto")
+            self.assertEqual(group.garment_count, 3)
+            self.assertEqual(
+                [image.content_hash for image in group.references[:3]],
+                [image.content_hash for image in self.page.garment_assets],
+            )
+            self.assertEqual(
+                group.references[-1].content_hash,
+                self.page.person_assets[index].content_hash,
+            )
+        self.assertEqual(self.database.list_tasks(), [])
+
+    def test_auto_match_splits_more_than_thirteen_garments(self) -> None:
+        garments = [
+            self._image(f"拆分服装{index:02d}.png", (index, 60, 90))
+            for index in range(20)
+        ]
+        people = [
+            self._image(f"拆分人物{index}.png", (100, 40 + index, 20))
+            for index in range(2)
+        ]
+        self.page._append_assets("garment", garments)
+        self.page._append_assets("person", people)
+        self.page._auto_match()
+        self.assertEqual(len(self.page.pairs), 4)
+        self.assertEqual(
+            [len(group.references) for group in self.page.pairs],
+            [14, 8, 14, 8],
+        )
+        for group in self.page.pairs:
+            self.assertLessEqual(len(group.references), 14)
+            self.assertEqual(group.roles[-1], "person")
+
+    def test_auto_groups_update_on_crop_and_remove_with_garment(self) -> None:
+        garments = [
+            self._image(f"联动服装{index}.png", (20 + index * 30, 70, 100))
+            for index in range(2)
+        ]
+        people = [
+            self._image(f"联动人物{index}.png", (120, 40 + index * 20, 30))
+            for index in range(2)
+        ]
+        self.page._append_assets("garment", garments)
+        self.page._append_assets("person", people)
+        self.page._auto_match()
+        original = self.page.garment_assets[0]
+        self.page.garment_list.setCurrentRow(0)
+
+        class FakeCropDialog:
+            DialogCode = QDialog.DialogCode
+
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def exec(self):
+                return QDialog.DialogCode.Accepted
+
+            @staticmethod
+            def crop_box():
+                return (5, 5, 45, 65)
+
+        with patch("yixin.ui.batch_dress_page.CropDialog", FakeCropDialog):
+            self.page._crop_selected("garment")
+        cropped = self.page.garment_assets[0]
+        self.assertNotEqual(cropped.content_hash, original.content_hash)
+        for group in self.page.pairs:
+            self.assertIn(
+                cropped.content_hash,
+                [image.content_hash for image in group.references],
+            )
+            self.assertNotIn(
+                original.content_hash,
+                [image.content_hash for image in group.references],
+            )
+
+        self.page.garment_list.setCurrentRow(0)
+        with patch(
+            "yixin.ui.batch_dress_page.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ):
+            self.page._remove_selected("garment")
+        self.assertEqual(self.page.pairs, [])
+
+    def test_free_compose_dialog_limits_deduplicates_and_reorders(self) -> None:
+        garments = [
+            self._image(f"自由服装{index}.png", (20 + index * 30, 70, 110))
+            for index in range(8)
+        ]
+        people = [
+            self._image(f"自由人物{index}.png", (140, 30 + index * 20, 40))
+            for index in range(8)
+        ]
+        self.page._append_assets("garment", garments)
+        self.page._append_assets("person", people)
+        dialog = FreeComposeDialog(
+            self.page.garment_assets,
+            self.page.person_assets,
+        )
+        dialog.available_list.selectAll()
+        with patch(
+            "yixin.ui.batch_dress_page.QMessageBox.information"
+        ) as information:
+            dialog._add_selected()
+        self.assertEqual(dialog.selected_list.count(), 14)
+        information.assert_called_once()
+        selected = dialog.selected_items()
+        first_role, first_image = selected[0]
+        dialog.selected_list.setCurrentRow(0)
+        dialog._move_selected(1)
+        self.assertEqual(
+            dialog.selected_list.currentItem().data(Qt.ItemDataRole.UserRole),
+            (first_role, first_image),
+        )
+        dialog.available_list.setCurrentRow(0)
+        with patch("yixin.ui.batch_dress_page.QMessageBox.information"):
+            dialog._add_selected()
+        self.assertEqual(dialog.selected_list.count(), 14)
+        dialog.close()
+
+    def test_free_compose_appends_group_and_adds_source_prompt(self) -> None:
+        garment_one = self._image("自由组合服装1.png", (20, 50, 80))
+        garment_two = self._image("自由组合服装2.png", (50, 80, 110))
+        person = self._image("自由组合人物.png", (120, 70, 30))
+        self.page._append_assets("garment", [garment_one, garment_two])
+        self.page._append_assets("person", [person])
+        self.page._add_pair(
+            self.page.garment_assets[0],
+            self.page.person_assets[0],
+        )
+
+        class FakeFreeDialog:
+            DialogCode = QDialog.DialogCode
+
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def exec(self):
+                return QDialog.DialogCode.Accepted
+
+            @staticmethod
+            def selected_items():
+                return [
+                    ("person", self_page.person_assets[0]),
+                    ("garment", self_page.garment_assets[1]),
+                    ("garment", self_page.garment_assets[0]),
+                ]
+
+        self_page = self.page
+        with patch(
+            "yixin.ui.batch_dress_page.FreeComposeDialog",
+            FakeFreeDialog,
+        ):
+            self.page._free_compose()
+        self.assertEqual(len(self.page.pairs), 2)
+        group = self.page.pairs[-1]
+        self.assertEqual(group.kind, "free")
+        self.assertEqual(
+            group.references,
+            (
+                self.page.person_assets[0],
+                self.page.garment_assets[1],
+                self.page.garment_assets[0],
+            ),
+        )
+        self.assertEqual(
+            self.page._prompt_for_group("用户要求", group),
+            "自由组合：第 1 张为人物素材，第 2 张为服装素材，第 3 张为服装素材。\n用户要求",
+        )
+
+    def test_auto_and_free_tasks_store_final_prompt_and_modes(self) -> None:
+        garments = [
+            self._image(f"提示服装{index}.png", (20 + index * 20, 50, 80))
+            for index in range(2)
+        ]
+        person = self._image("提示人物.png", (100, 40, 20))
+        self.page._append_assets("garment", garments)
+        self.page._append_assets("person", [person])
+        self.page._auto_match()
+        self.page.prompt_edit.setPlainText("保持人物一致")
+        with (
+            patch(
+                "yixin.ui.batch_dress_page.QMessageBox.question",
+                return_value=QMessageBox.StandardButton.Yes,
+            ),
+            patch("yixin.ui.batch_dress_page.QMessageBox.information"),
+        ):
+            self.page._enqueue_all()
+        tasks = self.database.list_tasks()
+        self.assertEqual(len(tasks), 1)
+        task = tasks[0]
+        self.assertEqual(task["mode"], MODE_DRESS_UP)
+        self.assertTrue(task["prompt"].startswith("自动匹配："))
+        self.assertTrue(task["prompt"].endswith("保持人物一致"))
+        references = self.database.get_task_references(task["id"])
+        self.assertEqual(len(references), 3)
+        self.assertEqual(
+            references[-1].content_hash,
+            self.page.person_assets[0].content_hash,
+        )
+
+        free_group = DressTaskGroup(
+            references=(
+                self.page.person_assets[0],
+                self.page.garment_assets[0],
+            ),
+            roles=("person", "garment"),
+            kind="free",
+            auto_prompt=True,
+        )
+        self.page.pairs = [free_group]
+        self.page.prompt_edit.setPlainText("自由处理")
+        with (
+            patch(
+                "yixin.ui.batch_dress_page.QMessageBox.question",
+                return_value=QMessageBox.StandardButton.Yes,
+            ),
+            patch("yixin.ui.batch_dress_page.QMessageBox.information"),
+        ):
+            self.page._enqueue_all()
+        tasks = self.database.list_tasks()
+        self.assertEqual(len(tasks), 2)
+        free_task = tasks[0]
+        self.assertEqual(free_task["mode"], MODE_FREE_COMPOSE)
+        self.assertTrue(free_task["prompt"].startswith("自由组合："))
+
+    def test_free_compose_retry_restores_order_roles_and_user_prompt(self) -> None:
+        first = self.store.save_reference(
+            self._image("重试自由人物.png", (100, 50, 20))
+        )
+        second = self.store.save_reference(
+            self._image("重试自由服装.png", (20, 50, 80))
+        )
+        task_id = self.database.create_task(
+            ImageRequest(
+                model="gemini-3-pro-image",
+                prompt=(
+                    "自由组合：第 1 张为人物素材，第 2 张为服装素材。\n"
+                    "修改后重新生成"
+                ),
+                reference_images=(first, second),
+                mode=MODE_FREE_COMPOSE,
+            )
+        )
+        claimed = self.database.claim_next_queued()
+        self.database.transition_task(int(claimed["id"]), TASK_SUCCESS)
+        history = self.window.history_page
+        history.refresh()
+        history.show_task(task_id)
+        history._retry_current()
+        self.app.processEvents()
+
+        self.assertEqual(self.window.nav_list.currentRow(), 1)
+        self.assertEqual(len(self.page.pairs), 1)
+        group = self.page.pairs[0]
+        self.assertEqual(group.kind, "free")
+        self.assertEqual(group.roles, ("person", "garment"))
+        self.assertEqual(self.page.prompt_edit.toPlainText(), "修改后重新生成")
+        self.assertEqual(
+            [image.content_hash for image in group.references],
+            [first.content_hash, second.content_hash],
+        )
 
     def test_drag_drop_payload_creates_pair_for_target_person(self) -> None:
         self.page._append_assets(
@@ -593,6 +979,51 @@ class BatchDressTests(unittest.TestCase):
         self.assertEqual(batch.prompt_edit.toPlainText(), "创作页保存的通用模板")
         self.assertEqual(self.database.list_tasks(), [])
 
+    def test_builtin_dress_templates_are_shared_and_editable(self) -> None:
+        batch_names = [
+            self.page.template_combo.itemText(index)
+            for index in range(self.page.template_combo.count())
+        ]
+        create_names = [
+            self.window.create_page.template_combo.itemText(index)
+            for index in range(self.window.create_page.template_combo.count())
+        ]
+        for name in ("内置·基础服装替换", "内置·多图换装"):
+            self.assertIn(name, batch_names)
+            self.assertIn(name, create_names)
+        index = self.page.template_combo.findText("内置·基础服装替换")
+        self.page.template_combo.setCurrentIndex(index)
+        self.app.processEvents()
+        self.assertIn(
+            "【图2】中的人物的上衣改为【图1】中的服装",
+            self.page.prompt_edit.toPlainText(),
+        )
+        self.page.prompt_edit.append("用户补充")
+        self.assertIn("用户补充", self.page.prompt_edit.toPlainText())
+
+    def test_batch_template_switch_is_immediate_and_refresh_is_safe(self) -> None:
+        self.database.save_template("批量模板A", "批量提示词 A")
+        self.database.save_template("批量模板B", "批量提示词 B")
+        self.page.refresh_templates()
+        index_a = self.page.template_combo.findText("批量模板A")
+        index_b = self.page.template_combo.findText("批量模板B")
+        self.page.template_combo.setCurrentIndex(index_a)
+        self.app.processEvents()
+        self.assertEqual(self.page.prompt_edit.toPlainText(), "批量提示词 A")
+        self.page.template_combo.setCurrentIndex(index_b)
+        self.app.processEvents()
+        self.assertEqual(self.page.prompt_edit.toPlainText(), "批量提示词 B")
+
+        self.page.prompt_edit.setPlainText("批量用户修改")
+        self.page.refresh_templates()
+        self.assertEqual(self.page.prompt_edit.toPlainText(), "批量用户修改")
+        self.page.template_combo.setCurrentIndex(0)
+        self.assertEqual(self.page.prompt_edit.toPlainText(), "批量用户修改")
+        self.assertNotIn(
+            "应用",
+            [button.text() for button in self.page.findChildren(QPushButton)],
+        )
+
     def test_template_saved_in_batch_is_available_in_create(self) -> None:
         batch = self.page
         batch.prompt_edit.setPlainText("换装页保存的通用模板")
@@ -652,7 +1083,10 @@ class BatchDressTests(unittest.TestCase):
             batch._quick_save_template()
         get_text.assert_not_called()
         information.assert_called_once()
-        self.assertEqual(self.database.list_templates(), [])
+        self.assertEqual(
+            {item["name"] for item in self.database.list_templates()},
+            {name for name, _ in BUILTIN_PROMPT_TEMPLATES},
+        )
 
     def test_deleted_selected_template_returns_combo_to_default(self) -> None:
         template_id = self.database.save_template("待删除模板", "旧提示词")
@@ -826,7 +1260,7 @@ class BatchDressTests(unittest.TestCase):
         self.assertEqual(self.page.prompt_edit.toPlainText(), "历史批量换装")
         self.assertEqual(
             self.page.pairs[0],
-            DressPair(garment, person),
+            DressTaskGroup.manual(garment, person),
         )
 
     def test_batch_task_opens_in_create_queue_without_losing_previews(self) -> None:

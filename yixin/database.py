@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
 from .constants import (
+    BUILTIN_PROMPT_TEMPLATES,
     TASK_CANCELLED,
     TASK_FAILED,
     TASK_QUEUED,
@@ -169,10 +170,34 @@ class Database:
             }
             if "source_path" not in task_asset_columns:
                 connection.execute("ALTER TABLE task_assets ADD COLUMN source_path TEXT")
+            self._seed_builtin_templates(connection)
             connection.execute(
                 "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', ?)",
                 (str(SCHEMA_VERSION),),
             )
+
+    @staticmethod
+    def _seed_builtin_templates(connection: sqlite3.Connection) -> None:
+        seed_key = "builtin_templates_seeded_v1"
+        seeded = connection.execute(
+            "SELECT value FROM app_settings WHERE key = ?",
+            (seed_key,),
+        ).fetchone()
+        if seeded is not None:
+            return
+        now = utc_now_iso()
+        for name, prompt in BUILTIN_PROMPT_TEMPLATES:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO templates(name, prompt, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (name, prompt, now, now),
+            )
+        connection.execute(
+            "INSERT INTO app_settings(key, value) VALUES (?, '1')",
+            (seed_key,),
+        )
 
     def create_task(self, request: ImageRequest) -> int:
         return self.create_tasks((request,))[0]

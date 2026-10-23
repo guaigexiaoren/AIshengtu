@@ -37,6 +37,28 @@ MAX_REFERENCE_IMAGES = 14
 MAX_BATCH_ASSETS = 50
 DEFAULT_BATCH_SIZE = 1
 
+BUILTIN_PROMPT_TEMPLATES = (
+    (
+        "内置·基础服装替换",
+        """# 任务需求；
+将【图2】中的人物的上衣改为【图1】中的服装
+
+# 要求
+1. 服装穿着合身自然，【图2】中被替换的服装不再出现，未替换的区域保持不变
+2. 其他细节：保持服装的面料质感、颜色、文字、图案、纹理、设计细节、人物、背景不变，不要出现水印""",
+    ),
+    (
+        "内置·多图换装",
+        """# 任务需求
+根据参考图开头的角色说明，将人物参考图中人物的上衣替换为服装参考图中的服装。
+
+# 要求
+1. 服装穿着合身自然，被替换的原服装不再出现，未替换的区域保持不变
+2. 保持服装的面料质感、颜色、文字、图案、纹理和设计细节
+3. 保持人物身份、姿态和背景不变，不要出现水印""",
+    ),
+)
+
 TASK_QUEUED = "queued"
 TASK_RUNNING = "running"
 TASK_SUCCESS = "success"
@@ -49,10 +71,12 @@ TASK_STATUSES = frozenset(
 MODE_TEXT = "text"
 MODE_REFERENCE = "reference"
 MODE_DRESS_UP = "dress_up"
+MODE_FREE_COMPOSE = "free_compose"
 MODE_LABELS = {
     MODE_TEXT: "文字生图",
     MODE_REFERENCE: "参考图编辑",
     MODE_DRESS_UP: "批量换装",
+    MODE_FREE_COMPOSE: "自由组合",
 }
 
 STATUS_LABELS = {

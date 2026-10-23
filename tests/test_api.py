@@ -8,7 +8,12 @@ from pathlib import Path
 import httpx
 
 from yixin.api import NanoBananaClient
-from yixin.constants import DEFAULT_ASPECT_RATIO, DEFAULT_RESOLUTION
+from yixin.constants import (
+    DEFAULT_ASPECT_RATIO,
+    DEFAULT_RESOLUTION,
+    MODE_DRESS_UP,
+    MODE_FREE_COMPOSE,
+)
 from yixin.models import ApiError, ImageRequest, StoredImage
 from yixin.storage import FileStore, data_url_for_file
 from yixin.paths import AppPaths
@@ -125,6 +130,33 @@ class ApiTests(unittest.TestCase):
             payload["images"][1],
             data_url_for_file(self.second_reference.path, self.second_reference.mime),
         )
+
+    def test_multi_reference_dress_up_and_free_compose_modes(self) -> None:
+        client = NanoBananaClient(lambda: self.key)
+        dress_up = ImageRequest(
+            model="gemini-3-pro-image",
+            prompt="自动匹配：第 1 至第 2 张为服装参考，第 3 张为人物参考。",
+            reference_images=(
+                self.reference,
+                self.second_reference,
+                self.reference,
+            ),
+            mode=MODE_DRESS_UP,
+        )
+        payload = client.build_payload(dress_up)
+        self.assertEqual(len(payload["images"]), 3)
+        self.assertNotIn("mode", payload)
+
+        free_compose = ImageRequest(
+            model="gemini-3-pro-image",
+            prompt="自由组合：第 1 张为人物素材。",
+            reference_images=(self.reference,),
+            mode=MODE_FREE_COMPOSE,
+        )
+        payload = client.build_payload(free_compose)
+        self.assertTrue(payload["image"].startswith("data:image/png;base64,"))
+        self.assertNotIn("images", payload)
+        self.assertNotIn("mode", payload)
 
     def test_fifteen_references_are_rejected(self) -> None:
         refs = tuple(self.reference for _ in range(15))

@@ -78,7 +78,8 @@ class SettingsDialog(QDialog):
         fixed_layout.addWidget(self.fixed_folder_button)
         local_form.addRow("固定文件夹", fixed_row)
         local_hint = QLabel(
-            "“每次询问”会记住上次目录；“参考图所在文件夹”使用任务中最后一张参考图的来源目录。"
+            "“每次询问”会记住上次目录；“AI图文件夹”会使用任务最后一张参考图"
+            "所在目录的上一级，并在那里创建或使用 AI图 文件夹。"
         )
         local_hint.setWordWrap(True)
         local_hint.setStyleSheet("color:#69768c;")

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from pathlib import Path
 
@@ -11,15 +10,6 @@ from .settings import (
     AppSettings,
 )
 from .storage import atomic_copy_file
-
-
-INVALID_FILENAME_CHARACTERS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-
-
-def safe_prompt_summary(prompt: str, limit: int = 24) -> str:
-    summary = INVALID_FILENAME_CHARACTERS.sub("_", prompt.strip())
-    summary = re.sub(r"\s+", "_", summary).strip(" ._")
-    return (summary[:limit] or "作品").rstrip(" ._")
 
 
 class LocalImageExporter:
@@ -36,8 +26,18 @@ class LocalImageExporter:
             references = self.database.get_task_references(task_id)
             if references:
                 source = references[-1].source_path
-                if source and source.parent.is_dir():
-                    return source.parent
+                if source and source.is_file():
+                    source = source.resolve()
+                    base = source.parent.parent
+                    if base.is_dir():
+                        folder = base / "AI图"
+                        try:
+                            folder.mkdir(exist_ok=True)
+                        except OSError:
+                            pass
+                        else:
+                            if folder.is_dir():
+                                return folder
         last_folder = self.settings.last_folder()
         return last_folder if last_folder and last_folder.is_dir() else None
 
@@ -58,10 +58,7 @@ class LocalImageExporter:
             raise ValueError("本地保存位置不是有效文件夹")
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        summary = safe_prompt_summary(task["prompt"])
-        stem = (
-            f"{summary}_{timestamp}_任务{task_id}_结果{int(result['position']) + 1}"
-        )
+        stem = f"AI图_{timestamp}_{int(result['position']) + 1}"
         suffix = source.suffix or ".png"
         destination = directory / f"{stem}{suffix}"
         sequence = 2

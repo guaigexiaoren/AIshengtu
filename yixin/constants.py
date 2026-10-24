@@ -11,7 +11,7 @@ MODEL_OPTIONS = (
     ("Nano Banana 2", "gemini-3.1-flash-image"),
     ("Nano Banana Pro", "gemini-3-pro-image"),
 )
-DEFAULT_MODEL = "gemini-3-pro-image"
+DEFAULT_MODEL = "gemini-3.1-flash-image"
 MODEL_IDS = frozenset(model_id for _, model_id in MODEL_OPTIONS)
 
 ASPECT_RATIOS = (

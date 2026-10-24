@@ -45,7 +45,7 @@ class LocalSaveController:
                 QMessageBox.information(
                     self.parent,
                     "需要选择保存位置",
-                    "没有找到可用的参考图来源目录，请选择本次保存文件夹。",
+                    "无法根据最后参考图创建可用的 AI图 文件夹，请选择本次保存文件夹。",
                 )
             elif mode == LOCAL_SAVE_FIXED:
                 QMessageBox.information(

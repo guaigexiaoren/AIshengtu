@@ -14,7 +14,7 @@ from yixin.database import Database
 from yixin.local_export import LocalImageExporter
 from yixin.models import ImageRequest
 from yixin.paths import AppPaths
-from yixin.settings import AppSettings
+from yixin.settings import LOCAL_SAVE_REFERENCE, AppSettings
 from yixin.storage import FileStore
 from yixin.ui.save_helpers import (
     LocalSaveController,
@@ -79,13 +79,55 @@ class LocalExportTests(unittest.TestCase):
         self.settings.set_local_save_mode("reference")
         self.assertEqual(
             self.exporter.preferred_directory(task_id),
-            self.root / "references",
+            self.root.resolve() / "AI图",
         )
+        self.assertTrue((self.root / "AI图").is_dir())
 
         with self.database.connection() as connection:
             connection.execute("UPDATE task_assets SET source_path = NULL")
         self.settings.set_last_folder(last)
         self.assertEqual(self.exporter.preferred_directory(task_id), last)
+
+    def test_ai_folder_uses_last_reference_and_reuses_folder(self) -> None:
+        first_source = make_image(
+            self.root / "客户" / "春季" / "一" / "first.png",
+            (10, 30, 60),
+        )
+        second_source = make_image(
+            self.root / "客户" / "秋季" / "人物" / "last.png",
+            (60, 30, 10),
+        )
+        references = (
+            self.store.save_reference(first_source),
+            self.store.save_reference(second_source),
+        )
+        task_id = self.database.create_task(
+            ImageRequest(
+                model="gemini-3-pro-image",
+                prompt="最后参考图路径",
+                reference_images=references,
+                mode="reference",
+            )
+        )
+        self.settings.set_local_save_mode(LOCAL_SAVE_REFERENCE)
+        expected = (self.root / "客户" / "秋季" / "AI图").resolve()
+        self.assertEqual(self.exporter.preferred_directory(task_id), expected)
+        marker = expected / "keep.txt"
+        marker.write_text("keep", encoding="utf-8")
+        self.assertEqual(self.exporter.preferred_directory(task_id), expected)
+        self.assertTrue(marker.is_file())
+
+    def test_ai_folder_permission_failure_falls_back_to_last_folder(self) -> None:
+        task_id, _, _ = self._completed_task()
+        last = self.root / "fallback"
+        last.mkdir()
+        self.settings.set_local_save_mode(LOCAL_SAVE_REFERENCE)
+        self.settings.set_last_folder(last)
+        with patch(
+            "yixin.local_export.Path.mkdir",
+            side_effect=PermissionError("denied"),
+        ):
+            self.assertEqual(self.exporter.preferred_directory(task_id), last)
 
     def test_local_save_copies_only_result_and_avoids_overwrite(self) -> None:
         task_id, result_id, result_path = self._completed_task()
@@ -96,9 +138,9 @@ class LocalExportTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertEqual(first.read_bytes(), Path(result_path).read_bytes())
         self.assertEqual(len(list(destination.iterdir())), 2)
-        self.assertNotIn(":", first.name)
-        self.assertNotIn("?", first.name)
-        self.assertRegex(second.stem, r"_2$")
+        self.assertRegex(first.name, r"^AI图_\d{8}_\d{6}_1\.png$")
+        self.assertNotIn("人物", first.name)
+        self.assertRegex(second.stem, r"_1_2$")
         self.assertEqual(self.settings.last_folder(), destination.resolve())
 
     def test_ask_mode_chooses_folder_and_updates_last_folder(self) -> None:

@@ -96,6 +96,7 @@ class BatchDressTests(unittest.TestCase):
         ]
         self.assertEqual(labels, ["创作", "批量换装", "历史记录", "作品库"])
         self.assertIs(self.window.stack.widget(1), self.page)
+        self.assertEqual(self.page.model_combo.currentData(), "gemini-3.1-flash-image")
 
     def test_folder_scan_uses_nested_paths_and_natural_order(self) -> None:
         root = Path(self.temp.name) / "服装文件夹"

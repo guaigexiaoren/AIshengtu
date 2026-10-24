@@ -113,10 +113,21 @@ class HistoryPage(QWidget):
         self.detail_title = QLabel("选择一个历史任务")
         self.detail_title.setStyleSheet("font-size:20px;font-weight:700;")
         detail_layout.addWidget(self.detail_title)
-        self.detail_meta = QLabel("任务参数、请求 ID 和错误信息会显示在这里。")
+        self.detail_meta = QLabel("任务参数和请求 ID 会显示在这里。")
         self.detail_meta.setWordWrap(True)
         self.detail_meta.setStyleSheet("color:#637086;")
         detail_layout.addWidget(self.detail_meta)
+        self.error_label = QLabel("")
+        self.error_label.setWordWrap(True)
+        self.error_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.error_label.setStyleSheet(
+            "color:#b72f3c;background:#fff5f6;border:1px solid #e9b6bb;"
+            "border-radius:6px;padding:6px 8px;"
+        )
+        self.error_label.hide()
+        detail_layout.addWidget(self.error_label)
         self.elapsed_label = QLabel("")
         self.elapsed_label.setStyleSheet(
             "color:#2E64C4;font-weight:600;padding-top:2px;"
@@ -126,11 +137,6 @@ class HistoryPage(QWidget):
         self.prompt_view.setReadOnly(True)
         self.prompt_view.setMaximumHeight(150)
         detail_layout.addWidget(self.prompt_view)
-        self.error_view = QTextEdit()
-        self.error_view.setReadOnly(True)
-        self.error_view.setMaximumHeight(100)
-        self.error_view.setPlaceholderText("没有错误信息")
-        detail_layout.addWidget(self.error_view)
         self.asset_strip = ImageStrip(icon_size=76)
         detail_layout.addWidget(self.asset_strip)
         self.preview = ImageView()
@@ -270,6 +276,9 @@ class HistoryPage(QWidget):
             self.current_task_id = None
             self.current_task_snapshot = None
             self.elapsed_label.clear()
+            self.error_label.clear()
+            self.error_label.setToolTip("")
+            self.error_label.hide()
             return
         item = self.table.item(rows[0].row(), 0)
         if item:
@@ -304,7 +313,15 @@ class HistoryPage(QWidget):
         self.detail_meta.setText("\n".join(meta))
         self.elapsed_label.setText(f"总耗时：{format_task_elapsed(task)}")
         self.prompt_view.setPlainText(task["prompt"])
-        self.error_view.setPlainText(task["error_message"] or "")
+        error_message = task["error_message"] or ""
+        if error_message:
+            self.error_label.setText(f"错误：{error_message}")
+            self.error_label.setToolTip(error_message)
+            self.error_label.show()
+        else:
+            self.error_label.clear()
+            self.error_label.setToolTip("")
+            self.error_label.hide()
         self.current_results = self.database.get_task_results(task_id)
         references = self.database.get_task_references(task_id)
         self.current_assets = build_task_assets(references, self.current_results)

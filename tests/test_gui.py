@@ -14,6 +14,7 @@ from PySide6.QtGui import QDropEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QPushButton
 
+from yixin.constants import TASK_FAILED, TASK_SUCCESS
 from yixin.database import Database
 from yixin.library import LibraryService
 from yixin.models import ImageApiResult, ImageRequest, RemoteImage
@@ -101,10 +102,20 @@ class GuiFlowTests(unittest.TestCase):
         page = self.window.create_page
         self.assertEqual(page.aspect_combo.currentData(), "3:4")
         self.assertEqual(page.resolution_combo.currentData(), "2K")
-        self.assertEqual(page.model_combo.currentData(), "gemini-3-pro-image")
+        self.assertEqual(page.model_combo.currentData(), "gemini-3.1-flash-image")
         self.assertEqual(page.mode_combo.currentData(), "reference")
         self.assertTrue(page.reference_group.isVisible())
         self.assertIn("14", page.reference_count_label.text())
+
+    def test_default_model_is_saved_for_new_task(self) -> None:
+        page = self.window.create_page
+        page.mode_combo.setCurrentIndex(
+            page.mode_combo.findData("text")
+        )
+        page.prompt_edit.setPlainText("默认模型任务")
+        page._enqueue_generation()
+        task = self.database.list_tasks()[0]
+        self.assertEqual(task["model"], "gemini-3.1-flash-image")
 
     def test_full_gui_task_save_and_reopen(self) -> None:
         page = self.window.create_page
@@ -473,6 +484,7 @@ class GuiFlowTests(unittest.TestCase):
         self.assertEqual(len(self.database.list_tasks()), 1)
         page = self.window.create_page
         self.assertEqual(page.current_task_id, task_id)
+        self.assertEqual(page.model_combo.currentData(), "gemini-3-pro-image")
         self.assertEqual(page.mode_combo.currentData(), "text")
         self.assertEqual(page.prompt_edit.toPlainText(), "原始提示词")
         self.assertIn("修改参数后重新生成", page.task_status_label.text())
@@ -750,6 +762,44 @@ class GuiFlowTests(unittest.TestCase):
         self.assertIn("5分12秒", history.elapsed_label.text())
         row = history._find_task_row(task_id)
         self.assertEqual(history.table.item(row, 3).text(), "5分12秒")
+
+    def test_history_error_is_merged_into_hidden_top_label(self) -> None:
+        success_id = self.database.create_task(
+            ImageRequest(
+                model="gemini-3-pro-image",
+                prompt="成功任务",
+                mode="text",
+            )
+        )
+        success_task = self.database.claim_next_queued()
+        self.database.transition_task(int(success_task["id"]), TASK_SUCCESS)
+        failure_id = self.database.create_task(
+            ImageRequest(
+                model="gemini-3-pro-image",
+                prompt="失败任务",
+                mode="text",
+            )
+        )
+        failure_task = self.database.claim_next_queued()
+        self.database.transition_task(
+            int(failure_task["id"]),
+            TASK_FAILED,
+            error_message="服务端错误：参数无效",
+        )
+        history = self.window.history_page
+        self.assertFalse(hasattr(history, "error_view"))
+
+        history.show_task(success_id)
+        self.assertTrue(history.error_label.isHidden())
+        history.show_task(failure_id)
+        self.assertFalse(history.error_label.isHidden())
+        self.assertIn("服务端错误：参数无效", history.error_label.text())
+        self.assertEqual(
+            history.error_label.textInteractionFlags()
+            & Qt.TextInteractionFlag.TextSelectableByMouse,
+            Qt.TextInteractionFlag.TextSelectableByMouse,
+        )
+        self.assertTrue(history.error_label.wordWrap())
 
     def test_crop_canvas_returns_pixel_box(self) -> None:
         source = make_image(Path(self.temp.name) / "canvas-crop.png")

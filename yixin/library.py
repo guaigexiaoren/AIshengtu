@@ -181,6 +181,9 @@ class LibraryService:
                 "resolution": task["resolution"],
                 "n": task["n"],
             }
+            if task["auto_strategy"]:
+                parameters["auto_strategy"] = task["auto_strategy"]
+                parameters["auto_reason"] = task["auto_reason"]
             title = task["prompt"].strip().splitlines()[0][:48] or "未命名作品"
             assets: list[tuple[str, int, StoredImage]] = [
                 ("result", 0, output_stored),

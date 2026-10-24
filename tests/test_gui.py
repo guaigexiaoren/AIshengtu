@@ -27,7 +27,7 @@ from yixin.settings import (
     AppSettings,
 )
 from yixin.storage import FileStore
-from yixin.ui.dialogs import LibraryPickerDialog
+from yixin.ui.dialogs import LibraryPickerDialog, SettingsDialog
 from yixin.ui.crop import CropCanvas
 from yixin.ui.main_window import MainWindow
 from yixin.ui.theme import APP_STYLESHEET
@@ -102,7 +102,7 @@ class GuiFlowTests(unittest.TestCase):
         page = self.window.create_page
         self.assertEqual(page.aspect_combo.currentData(), "3:4")
         self.assertEqual(page.resolution_combo.currentData(), "2K")
-        self.assertEqual(page.model_combo.currentData(), "gemini-3.1-flash-image")
+        self.assertEqual(page.model_combo.currentData(), "auto")
         self.assertEqual(page.mode_combo.currentData(), "reference")
         self.assertTrue(page.reference_group.isVisible())
         self.assertIn("14", page.reference_count_label.text())
@@ -116,6 +116,56 @@ class GuiFlowTests(unittest.TestCase):
         page._enqueue_generation()
         task = self.database.list_tasks()[0]
         self.assertEqual(task["model"], "gemini-3.1-flash-image")
+        self.assertEqual(task["auto_strategy"], "quality")
+        self.assertIn("纯文字", task["auto_reason"])
+
+    def test_auto_model_uses_strategy_and_stores_decision(self) -> None:
+        page = self.window.create_page
+        source = make_image(Path(self.temp.name) / "auto-reference.png")
+        page._add_stored_references([source])
+        page.prompt_edit.setPlainText("普通修图")
+        page._enqueue_generation()
+        task = self.database.list_tasks()[0]
+        self.assertEqual(task["model"], "gemini-3-pro-image")
+        self.assertEqual(task["auto_strategy"], "quality")
+
+        settings = AppSettings(self.database)
+        settings.set_auto_strategy("value")
+        page._clear_references()
+        page._add_stored_references([source])
+        page.prompt_edit.setPlainText("普通修图")
+        page.resolution_combo.setCurrentText("4K")
+        page._enqueue_generation()
+        newest = self.database.list_tasks()[0]
+        self.assertEqual(newest["model"], "gemini-3.1-flash-image")
+        self.assertEqual(newest["auto_strategy"], "value")
+        self.assertEqual(self.database.list_tasks()[1]["model"], "gemini-3-pro-image")
+
+    def test_settings_dialog_saves_auto_strategy(self) -> None:
+        dialog = SettingsDialog(self.secret_store, self.database)
+        dialog.auto_strategy_combo.setCurrentIndex(
+            dialog.auto_strategy_combo.findData("value")
+        )
+        with patch("yixin.ui.dialogs.QMessageBox.information"):
+            dialog._save()
+        self.assertEqual(
+            AppSettings(self.database).auto_strategy(),
+            "value",
+        )
+
+    def test_history_displays_auto_model_decision(self) -> None:
+        page = self.window.create_page
+        source = make_image(Path(self.temp.name) / "history-auto.png")
+        page._add_stored_references([source])
+        page.prompt_edit.setPlainText("普通修图")
+        page._enqueue_generation()
+        task = self.database.list_tasks()[0]
+        history = self.window.history_page
+        history.show_task(task["id"])
+        text = history.detail_meta.text()
+        self.assertIn("Nano Banana Pro", text)
+        self.assertIn("自动策略：质量优先", text)
+        self.assertIn("判断：", text)
 
     def test_full_gui_task_save_and_reopen(self) -> None:
         page = self.window.create_page

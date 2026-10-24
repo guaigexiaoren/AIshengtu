@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..constants import (
+    AUTO_MODEL_ID,
     ASPECT_RATIOS,
     DEFAULT_ASPECT_RATIO,
     DEFAULT_BATCH_SIZE,
@@ -42,11 +43,12 @@ from ..constants import (
     MODE_DRESS_UP,
     MODE_FREE_COMPOSE,
     MAX_REFERENCE_IMAGES,
-    MODEL_OPTIONS,
+    MODEL_SELECTION_OPTIONS,
     RESOLUTIONS,
 )
 from ..database import Database
 from ..library import LibraryService
+from ..model_router import choose_model
 from ..models import ImageRequest, StoredImage
 from ..security import SecretStore
 from ..settings import AppSettings, INPUT_BATCH_GARMENT, INPUT_BATCH_PERSON
@@ -785,12 +787,12 @@ class BatchDressPage(QWidget):
         form = QFormLayout(card)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.model_combo = QComboBox()
-        for name, model_id in MODEL_OPTIONS:
+        for name, model_id in MODEL_SELECTION_OPTIONS:
             self.model_combo.addItem(name, model_id)
         self.model_combo.setCurrentIndex(
             next(
                 index
-                for index, (_, model_id) in enumerate(MODEL_OPTIONS)
+                for index, (_, model_id) in enumerate(MODEL_SELECTION_OPTIONS)
                 if model_id == DEFAULT_MODEL
             )
         )
@@ -1676,20 +1678,35 @@ class BatchDressPage(QWidget):
             return
 
         requests = []
+        selected_model = self.model_combo.currentData()
+        strategy = self.app_settings.auto_strategy()
         for group in self.pairs:
+            prompt_for_group = self._prompt_for_group(prompt, group)
+            task_model = selected_model
+            auto_strategy = None
+            auto_reason = None
+            mode = MODE_FREE_COMPOSE if group.kind == "free" else MODE_DRESS_UP
+            if selected_model == AUTO_MODEL_ID:
+                decision = choose_model(
+                    prompt=prompt_for_group,
+                    mode=mode,
+                    reference_count=len(group.references),
+                    strategy=strategy,
+                )
+                task_model = decision.model
+                auto_strategy = decision.strategy
+                auto_reason = decision.reason
             requests.append(
                 ImageRequest(
-                    model=self.model_combo.currentData(),
-                    prompt=self._prompt_for_group(prompt, group),
+                    model=task_model,
+                    prompt=prompt_for_group,
                     n=count,
                     aspect_ratio=self.aspect_combo.currentData(),
                     resolution=self.resolution_combo.currentData(),
                     reference_images=group.references,
-                    mode=(
-                        MODE_FREE_COMPOSE
-                        if group.kind == "free"
-                        else MODE_DRESS_UP
-                    ),
+                    mode=mode,
+                    auto_strategy=auto_strategy,
+                    auto_reason=auto_reason,
                 )
             )
         try:

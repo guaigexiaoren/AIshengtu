@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 
 from ..constants import (
     MODE_LABELS,
-    MODEL_OPTIONS,
+    MODEL_LABELS,
     STATUS_LABELS,
     TASK_CANCELLED,
     TASK_FAILED,
@@ -31,7 +31,7 @@ from ..constants import (
 from ..database import Database
 from ..library import LibraryService
 from ..local_export import LocalImageExporter
-from ..settings import AppSettings
+from ..settings import AUTO_STRATEGY_LABELS, AppSettings
 from ..time_utils import format_task_elapsed
 from ..worker import TaskWorker
 from .save_helpers import LocalSaveController, show_saved_path, show_saved_toast
@@ -196,16 +196,16 @@ class HistoryPage(QWidget):
             self.table.selectRow(selected_row)
 
     def _task_row_values(self, task: dict) -> list[str]:
+        model_name = MODEL_LABELS.get(task["model"], task["model"])
+        if task["auto_strategy"]:
+            model_name += " · 自动"
         return [
             str(task["id"]),
             task["created_at"].replace("T", " ")[:16],
             STATUS_LABELS.get(task["status"], task["status"]),
             format_task_elapsed(task),
             f"{MODE_LABELS.get(task['mode'], task['mode'])} · "
-            + next(
-                (name for name, model_id in MODEL_OPTIONS if model_id == task["model"]),
-                task["model"],
-            ),
+            + model_name,
             task["prompt"].replace("\n", " ")[:80],
         ]
 
@@ -293,15 +293,19 @@ class HistoryPage(QWidget):
         self.detail_title.setText(
             f"任务 #{task_id} · {STATUS_LABELS.get(task['status'], task['status'])}"
         )
-        model_name = next(
-            (name for name, model_id in MODEL_OPTIONS if model_id == task["model"]),
-            task["model"],
-        )
+        model_name = MODEL_LABELS.get(task["model"], task["model"])
         meta = [
             f"{MODE_LABELS.get(task['mode'], task['mode'])} · {model_name}",
             f"宽高比 {task['aspect_ratio']} · 分辨率 {task['resolution'] or '自动'} · 数量 {task['n']}",
             f"创建时间 {task['created_at'].replace('T', ' ')[:19]}",
         ]
+        if task["auto_strategy"]:
+            meta.append(
+                "自动策略："
+                + AUTO_STRATEGY_LABELS.get(task["auto_strategy"], task["auto_strategy"])
+            )
+        if task["auto_reason"]:
+            meta.append(f"判断：{task['auto_reason']}")
         if task["request_id"]:
             meta.append(f"X-Request-Id：{task['request_id']}")
         if task["remote_task_id"]:

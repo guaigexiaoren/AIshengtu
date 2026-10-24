@@ -18,7 +18,7 @@ from .models import ImageRequest, StoredImage
 from .storage import utc_now_iso
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class StateTransitionError(RuntimeError):
@@ -60,6 +60,8 @@ class Database:
                     status TEXT NOT NULL,
                     mode TEXT NOT NULL,
                     model TEXT NOT NULL,
+                    auto_strategy TEXT,
+                    auto_reason TEXT,
                     prompt TEXT NOT NULL,
                     aspect_ratio TEXT NOT NULL,
                     resolution TEXT,
@@ -170,6 +172,14 @@ class Database:
             }
             if "source_path" not in task_asset_columns:
                 connection.execute("ALTER TABLE task_assets ADD COLUMN source_path TEXT")
+            task_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(tasks)").fetchall()
+            }
+            if "auto_strategy" not in task_columns:
+                connection.execute("ALTER TABLE tasks ADD COLUMN auto_strategy TEXT")
+            if "auto_reason" not in task_columns:
+                connection.execute("ALTER TABLE tasks ADD COLUMN auto_reason TEXT")
             self._seed_builtin_templates(connection)
             connection.execute(
                 "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', ?)",
@@ -225,14 +235,17 @@ class Database:
         cursor = connection.execute(
             """
             INSERT INTO tasks(
-                status, mode, model, prompt, aspect_ratio, resolution, n,
+                status, mode, model, auto_strategy, auto_reason,
+                prompt, aspect_ratio, resolution, n,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 TASK_QUEUED,
                 request.mode,
                 request.model,
+                request.auto_strategy,
+                request.auto_reason,
                 request.prompt.strip(),
                 request.aspect_ratio,
                 request.effective_resolution,

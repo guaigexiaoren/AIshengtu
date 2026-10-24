@@ -11,8 +11,14 @@ MODEL_OPTIONS = (
     ("Nano Banana 2", "gemini-3.1-flash-image"),
     ("Nano Banana Pro", "gemini-3-pro-image"),
 )
-DEFAULT_MODEL = "gemini-3.1-flash-image"
+AUTO_MODEL_ID = "auto"
+MODEL_SELECTION_OPTIONS = (
+    ("自动推荐", AUTO_MODEL_ID),
+    *MODEL_OPTIONS,
+)
+DEFAULT_MODEL = AUTO_MODEL_ID
 MODEL_IDS = frozenset(model_id for _, model_id in MODEL_OPTIONS)
+MODEL_LABELS = dict(MODEL_OPTIONS)
 
 ASPECT_RATIOS = (
     "auto",

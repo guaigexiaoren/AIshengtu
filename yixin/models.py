@@ -41,6 +41,8 @@ class ImageRequest:
     resolution: str | None = DEFAULT_RESOLUTION
     reference_images: tuple[StoredImage, ...] = ()
     mode: str = MODE_TEXT
+    auto_strategy: str | None = None
+    auto_reason: str | None = None
 
     def validate(self) -> None:
         if self.model not in MODEL_IDS:

@@ -96,7 +96,7 @@ class BatchDressTests(unittest.TestCase):
         ]
         self.assertEqual(labels, ["创作", "批量换装", "历史记录", "作品库"])
         self.assertIs(self.window.stack.widget(1), self.page)
-        self.assertEqual(self.page.model_combo.currentData(), "gemini-3.1-flash-image")
+        self.assertEqual(self.page.model_combo.currentData(), "auto")
 
     def test_folder_scan_uses_nested_paths_and_natural_order(self) -> None:
         root = Path(self.temp.name) / "服装文件夹"
@@ -1189,6 +1189,7 @@ class BatchDressTests(unittest.TestCase):
             self.assertEqual(task["mode"], MODE_DRESS_UP)
             self.assertEqual(task["prompt"], "保持人物不变，换成参考服装")
             self.assertEqual(task["model"], "gemini-nano-banana-2.1")
+            self.assertIsNone(task["auto_strategy"])
             self.assertEqual(task["aspect_ratio"], "16:9")
             self.assertEqual(task["resolution"], "4K")
             self.assertEqual(task["n"], 2)
@@ -1204,6 +1205,27 @@ class BatchDressTests(unittest.TestCase):
                 references[1].content_hash,
                 self.store.save_reference(person).content_hash,
             )
+
+    def test_auto_two_image_dress_up_uses_pro(self) -> None:
+        garment = self._image("自动策略服装.png", (20, 50, 80))
+        person = self._image("自动策略人物.png", (100, 50, 20))
+        self.page._append_assets("garment", [garment])
+        self.page._append_assets("person", [person])
+        self.page._add_pair(
+            self.page.garment_assets[0],
+            self.page.person_assets[0],
+        )
+        self.page.prompt_edit.setPlainText("保持人物、背景和服装细节不变")
+        self.page.resolution_combo.setCurrentText("4K")
+        with patch(
+            "yixin.ui.batch_dress_page.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ), patch("yixin.ui.batch_dress_page.QMessageBox.information"):
+            self.page._enqueue_all()
+        task = self.database.list_tasks()[0]
+        self.assertEqual(task["model"], "gemini-3-pro-image")
+        self.assertEqual(task["auto_strategy"], "quality")
+        self.assertIn("参考图编辑", task["auto_reason"])
 
     def test_cancelled_confirmation_and_empty_prompt_create_nothing(self) -> None:
         garment = self._image("确认服装.png", (20, 50, 80))

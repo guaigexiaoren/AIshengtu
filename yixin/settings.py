@@ -22,12 +22,21 @@ INPUT_FOLDER_KEYS = {
     INPUT_BATCH_GARMENT: "input_last_folder_batch_garment",
     INPUT_BATCH_PERSON: "input_last_folder_batch_person",
 }
+AUTO_STRATEGY_QUALITY = "quality"
+AUTO_STRATEGY_VALUE = "value"
+AUTO_STRATEGIES = (AUTO_STRATEGY_QUALITY, AUTO_STRATEGY_VALUE)
+AUTO_STRATEGY_LABELS = {
+    AUTO_STRATEGY_QUALITY: "质量优先",
+    AUTO_STRATEGY_VALUE: "性价比优先",
+}
+DEFAULT_AUTO_STRATEGY = AUTO_STRATEGY_QUALITY
 
 
 class AppSettings:
     MODE_KEY = "local_save_mode"
     FIXED_FOLDER_KEY = "local_save_fixed_folder"
     LAST_FOLDER_KEY = "local_save_last_folder"
+    AUTO_STRATEGY_KEY = "auto_model_strategy"
 
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -58,6 +67,18 @@ class AppSettings:
         self.database.set_setting(
             self.LAST_FOLDER_KEY, str(folder) if folder is not None else ""
         )
+
+    def auto_strategy(self) -> str:
+        value = self.database.get_setting(
+            self.AUTO_STRATEGY_KEY,
+            DEFAULT_AUTO_STRATEGY,
+        )
+        return value if value in AUTO_STRATEGIES else DEFAULT_AUTO_STRATEGY
+
+    def set_auto_strategy(self, strategy: str) -> None:
+        if strategy not in AUTO_STRATEGIES:
+            raise ValueError("不支持的自动模型策略")
+        self.database.set_setting(self.AUTO_STRATEGY_KEY, strategy)
 
     def input_folder(self, scope: str) -> Path | None:
         key = INPUT_FOLDER_KEYS.get(scope)

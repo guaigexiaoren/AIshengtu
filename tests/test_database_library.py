@@ -17,6 +17,8 @@ from yixin.library import LibraryService
 from yixin.models import ImageRequest
 from yixin.paths import AppPaths
 from yixin.settings import (
+    AUTO_STRATEGY_QUALITY,
+    AUTO_STRATEGY_VALUE,
     INPUT_BATCH_GARMENT,
     INPUT_BATCH_PERSON,
     INPUT_CREATE_REFERENCE,
@@ -273,11 +275,14 @@ class DatabaseLibraryTests(unittest.TestCase):
     def test_app_settings_persist(self) -> None:
         settings = AppSettings(self.database)
         self.assertEqual(settings.local_save_mode(), "ask")
+        self.assertEqual(settings.auto_strategy(), AUTO_STRATEGY_QUALITY)
         settings.set_local_save_mode("fixed")
+        settings.set_auto_strategy(AUTO_STRATEGY_VALUE)
         settings.set_fixed_folder(Path(self.temp.name) / "fixed")
         settings.set_last_folder(Path(self.temp.name) / "last")
         reopened = AppSettings(Database(self.paths.database))
         self.assertEqual(reopened.local_save_mode(), "fixed")
+        self.assertEqual(reopened.auto_strategy(), AUTO_STRATEGY_VALUE)
         self.assertEqual(reopened.fixed_folder(), Path(self.temp.name) / "fixed")
         self.assertEqual(reopened.last_folder(), Path(self.temp.name) / "last")
 
@@ -358,7 +363,42 @@ class DatabaseLibraryTests(unittest.TestCase):
             ).fetchone()["value"]
         self.assertIn("source_path", columns)
         self.assertEqual(count, 1)
-        self.assertEqual(version, "2")
+        self.assertEqual(version, "3")
+
+    def test_version_two_database_adds_auto_model_columns(self) -> None:
+        legacy_path = Path(self.temp.name) / "legacy-v2" / "app.db"
+        legacy_path.parent.mkdir(parents=True)
+        connection = sqlite3.connect(legacy_path)
+        try:
+            connection.execute(
+                """
+                CREATE TABLE tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    status TEXT NOT NULL,
+                    model TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "INSERT INTO tasks(status, model) VALUES ('success', 'old-model')"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        migrated = Database(legacy_path)
+        migrated.initialize()
+        with migrated.connection() as db:
+            columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(tasks)")
+            }
+            row = db.execute(
+                "SELECT model, auto_strategy, auto_reason FROM tasks"
+            ).fetchone()
+        self.assertIn("auto_strategy", columns)
+        self.assertIn("auto_reason", columns)
+        self.assertEqual(row["model"], "old-model")
+        self.assertIsNone(row["auto_strategy"])
+        self.assertIsNone(row["auto_reason"])
 
 
 if __name__ == "__main__":

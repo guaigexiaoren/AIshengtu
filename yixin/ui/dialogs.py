@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
 from ..database import Database
 from ..security import SecretStore, mask_secret, validate_api_key
 from ..settings import (
+    AUTO_STRATEGIES,
+    AUTO_STRATEGY_LABELS,
     LOCAL_SAVE_LABELS,
     LOCAL_SAVE_MODES,
     AppSettings,
@@ -60,6 +62,24 @@ class SettingsDialog(QDialog):
         form.addRow("当前密钥", self.current_label)
         form.addRow("新密钥", self.key_edit)
         layout.addLayout(form)
+
+        auto_group = QGroupBox("自动模型策略")
+        auto_form = QFormLayout(auto_group)
+        self.auto_strategy_combo = QComboBox()
+        for strategy in AUTO_STRATEGIES:
+            self.auto_strategy_combo.addItem(
+                AUTO_STRATEGY_LABELS[strategy],
+                strategy,
+            )
+        auto_form.addRow("策略", self.auto_strategy_combo)
+        auto_hint = QLabel(
+            "质量优先会更早使用 Pro；性价比优先会让单图普通编辑使用 "
+            "Nano Banana 2。只影响之后创建的任务，不增加接口费用。"
+        )
+        auto_hint.setWordWrap(True)
+        auto_hint.setStyleSheet("color:#69768c;")
+        auto_form.addRow(auto_hint)
+        layout.addWidget(auto_group)
 
         local_group = QGroupBox("本地保存位置")
         local_form = QFormLayout(local_group)
@@ -115,6 +135,11 @@ class SettingsDialog(QDialog):
         mode = self.settings.local_save_mode()
         index = self.local_mode_combo.findData(mode)
         self.local_mode_combo.setCurrentIndex(index if index >= 0 else 0)
+        strategy = self.settings.auto_strategy()
+        strategy_index = self.auto_strategy_combo.findData(strategy)
+        self.auto_strategy_combo.setCurrentIndex(
+            strategy_index if strategy_index >= 0 else 0
+        )
         folder = self.settings.fixed_folder()
         self.fixed_folder_edit.setText(str(folder) if folder else "")
         self._update_folder_controls()
@@ -151,6 +176,7 @@ class SettingsDialog(QDialog):
                 return
             self.key_edit.clear()
         self.settings.set_local_save_mode(mode)
+        self.settings.set_auto_strategy(self.auto_strategy_combo.currentData())
         self.settings.set_fixed_folder(Path(folder_text) if folder_text else None)
         self._refresh()
         QMessageBox.information(

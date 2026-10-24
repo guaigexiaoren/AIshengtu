@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..constants import (
+    AUTO_MODEL_ID,
     ASPECT_RATIOS,
     DEFAULT_ASPECT_RATIO,
     DEFAULT_BATCH_SIZE,
@@ -37,7 +38,8 @@ from ..constants import (
     MODE_LABELS,
     MODE_REFERENCE,
     MODE_TEXT,
-    MODEL_OPTIONS,
+    MODEL_LABELS,
+    MODEL_SELECTION_OPTIONS,
     RESOLUTIONS,
     STATUS_LABELS,
     TASK_CANCELLED,
@@ -49,9 +51,14 @@ from ..constants import (
 from ..database import Database
 from ..library import LibraryService
 from ..local_export import LocalImageExporter
+from ..model_router import choose_model
 from ..models import ImageRequest, StoredImage
 from ..security import SecretStore
-from ..settings import AppSettings, INPUT_CREATE_REFERENCE
+from ..settings import (
+    AUTO_STRATEGY_LABELS,
+    AppSettings,
+    INPUT_CREATE_REFERENCE,
+)
 from ..storage import FileStore, ImageValidationError
 from ..time_utils import format_task_elapsed
 from ..worker import TaskWorker
@@ -167,10 +174,14 @@ class CreatePage(QWidget):
         form.setVerticalSpacing(10)
 
         self.model_combo = QComboBox()
-        for name, model_id in MODEL_OPTIONS:
+        for name, model_id in MODEL_SELECTION_OPTIONS:
             self.model_combo.addItem(name, model_id)
         self.model_combo.setCurrentIndex(
-            next(i for i, (_, model_id) in enumerate(MODEL_OPTIONS) if model_id == DEFAULT_MODEL)
+            next(
+                i
+                for i, (_, model_id) in enumerate(MODEL_SELECTION_OPTIONS)
+                if model_id == DEFAULT_MODEL
+            )
         )
         form.addRow("模型", self.model_combo)
 
@@ -713,14 +724,29 @@ class CreatePage(QWidget):
             QMessageBox.information(self, "缺少参考图", "参考图编辑至少需要一张图片。")
             return
         resolution = self.resolution_combo.currentData()
+        selected_model = self.model_combo.currentData()
+        auto_strategy = None
+        auto_reason = None
+        if selected_model == AUTO_MODEL_ID:
+            decision = choose_model(
+                prompt=prompt,
+                mode=mode,
+                reference_count=len(references),
+                strategy=self.app_settings.auto_strategy(),
+            )
+            selected_model = decision.model
+            auto_strategy = decision.strategy
+            auto_reason = decision.reason
         request = ImageRequest(
-            model=self.model_combo.currentData(),
+            model=selected_model,
             prompt=prompt,
             n=self.count_spin.value(),
             aspect_ratio=self.aspect_combo.currentData(),
             resolution=resolution,
             reference_images=references,
             mode=mode,
+            auto_strategy=auto_strategy,
+            auto_reason=auto_reason,
         )
         try:
             request.validate()
@@ -758,10 +784,9 @@ class CreatePage(QWidget):
                     status_text = "停止等待中"
                 status_item = QTableWidgetItem(status_text)
                 status_item.setData(Qt.ItemDataRole.UserRole, task["status"])
-                model_name = next(
-                    (name for name, model_id in MODEL_OPTIONS if model_id == task["model"]),
-                    task["model"],
-                )
+                model_name = MODEL_LABELS.get(task["model"], task["model"])
+                if task["auto_strategy"]:
+                    model_name = f"{model_name} · 自动"
                 mode_item = QTableWidgetItem(
                     f"{MODE_LABELS.get(task['mode'], task['mode'])} · {model_name}"
                 )
@@ -889,15 +914,19 @@ class CreatePage(QWidget):
         status_text = STATUS_LABELS.get(task["status"], task["status"])
         if task["status"] == TASK_RUNNING and task["cancel_requested"]:
             status_text = "停止等待中"
-        model_name = next(
-            (name for name, model_id in MODEL_OPTIONS if model_id == task["model"]),
-            task["model"],
-        )
+        model_name = MODEL_LABELS.get(task["model"], task["model"])
         self.task_status_label.setText(f"任务 #{task_id} · {status_text}")
         details = [
             f"{MODE_LABELS.get(task['mode'], task['mode'])} · {model_name}",
             f"宽高比 {task['aspect_ratio']} · 分辨率 {task['resolution'] or '自动'} · 数量 {task['n']}",
         ]
+        if task["auto_strategy"]:
+            details.append(
+                "自动策略："
+                + AUTO_STRATEGY_LABELS.get(task["auto_strategy"], task["auto_strategy"])
+            )
+        if task["auto_reason"]:
+            details.append(f"判断：{task['auto_reason']}")
         if task["request_id"]:
             details.append(f"Request ID：{task['request_id']}")
         if task["remote_task_id"]:

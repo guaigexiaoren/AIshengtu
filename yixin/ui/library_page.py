@@ -20,8 +20,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..constants import MODEL_LABELS
 from ..database import Database
 from ..library import LibraryService
+from ..settings import AUTO_STRATEGY_LABELS
 from .widgets import (
     SUPPORTED_REFERENCE_SUFFIXES,
     ImageStrip,
@@ -377,8 +379,15 @@ class LibraryPage(QWidget):
                 f" · {work['created_at'].replace('T', ' ')[:16]}"
             )
         else:
+            model_name = MODEL_LABELS.get(work["model"], work["model"])
+            strategy = params.get("auto_strategy")
+            auto_text = (
+                f" · 自动策略 {AUTO_STRATEGY_LABELS.get(strategy, strategy)}"
+                if strategy
+                else ""
+            )
             self.meta_label.setText(
-                f"{work['model']} · 宽高比 {params.get('aspect_ratio', '—')}"
+                f"{model_name}{auto_text} · 宽高比 {params.get('aspect_ratio', '—')}"
                 f" · 分辨率 {params.get('resolution') or '自动'} · 数量 {params.get('n', '—')}"
                 f" · {work['created_at'].replace('T', ' ')[:16]}"
             )

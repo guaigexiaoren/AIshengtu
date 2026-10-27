@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QComboBox,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -28,6 +29,8 @@ from ..security import SecretStore, mask_secret, validate_api_key
 from ..settings import (
     AUTO_STRATEGIES,
     AUTO_STRATEGY_LABELS,
+    MAX_QUEUE_CONCURRENCY,
+    MIN_QUEUE_CONCURRENCY,
     LOCAL_SAVE_LABELS,
     LOCAL_SAVE_MODES,
     AppSettings,
@@ -36,6 +39,8 @@ from .widgets import CompareWidget, load_scaled_pixmap
 
 
 class SettingsDialog(QDialog):
+    settings_saved = Signal()
+
     def __init__(
         self,
         secret_store: SecretStore,
@@ -80,6 +85,21 @@ class SettingsDialog(QDialog):
         auto_hint.setStyleSheet("color:#69768c;")
         auto_form.addRow(auto_hint)
         layout.addWidget(auto_group)
+
+        queue_group = QGroupBox("后台任务")
+        queue_form = QFormLayout(queue_group)
+        self.concurrency_spin = QSpinBox()
+        self.concurrency_spin.setRange(MIN_QUEUE_CONCURRENCY, MAX_QUEUE_CONCURRENCY)
+        self.concurrency_spin.setSuffix(" 个")
+        queue_form.addRow("同时执行任务数", self.concurrency_spin)
+        queue_hint = QLabel(
+            "提高并发可以缩短批量任务总耗时，也可能更快产生费用或触发流光限流。"
+            "保存后立即生效，正在执行的任务不会中断。"
+        )
+        queue_hint.setWordWrap(True)
+        queue_hint.setStyleSheet("color:#69768c;")
+        queue_form.addRow(queue_hint)
+        layout.addWidget(queue_group)
 
         local_group = QGroupBox("本地保存位置")
         local_form = QFormLayout(local_group)
@@ -140,6 +160,7 @@ class SettingsDialog(QDialog):
         self.auto_strategy_combo.setCurrentIndex(
             strategy_index if strategy_index >= 0 else 0
         )
+        self.concurrency_spin.setValue(self.settings.queue_concurrency())
         folder = self.settings.fixed_folder()
         self.fixed_folder_edit.setText(str(folder) if folder else "")
         self._update_folder_controls()
@@ -177,8 +198,10 @@ class SettingsDialog(QDialog):
             self.key_edit.clear()
         self.settings.set_local_save_mode(mode)
         self.settings.set_auto_strategy(self.auto_strategy_combo.currentData())
+        self.settings.set_queue_concurrency(self.concurrency_spin.value())
         self.settings.set_fixed_folder(Path(folder_text) if folder_text else None)
         self._refresh()
+        self.settings_saved.emit()
         QMessageBox.information(
             self,
             "已保存",

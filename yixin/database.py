@@ -15,7 +15,7 @@ from .constants import (
     TASK_SUCCESS,
 )
 from .models import ImageRequest, StoredImage
-from .storage import utc_now_iso
+from .storage import local_now_iso, utc_now_iso
 
 
 SCHEMA_VERSION = 3
@@ -220,7 +220,7 @@ class Database:
             request.validate()
 
         task_ids: list[int] = []
-        now = utc_now_iso()
+        now = local_now_iso()
         with self.connection() as connection:
             for request in requests:
                 task_ids.append(self._insert_task(connection, request, now))
@@ -278,7 +278,7 @@ class Database:
         return task_id
 
     def claim_next_queued(self) -> dict[str, Any] | None:
-        now = utc_now_iso()
+        now = local_now_iso()
         with self.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -303,7 +303,7 @@ class Database:
             return dict(claimed)
 
     def recover_after_restart(self) -> int:
-        now = utc_now_iso()
+        now = local_now_iso()
         with self.connection() as connection:
             cancelled = connection.execute(
                 """
@@ -346,7 +346,7 @@ class Database:
             TASK_FAILED: set(),
             TASK_CANCELLED: set(),
         }
-        now = utc_now_iso()
+        now = local_now_iso()
         with self.connection() as connection:
             row = connection.execute(
                 "SELECT status FROM tasks WHERE id = ?", (task_id,)
@@ -413,7 +413,7 @@ class Database:
                     raw_response,
                     input_tokens,
                     output_tokens,
-                    utc_now_iso(),
+                    local_now_iso(),
                     task_id,
                 ),
             )
@@ -436,11 +436,11 @@ class Database:
                     updated_at = ?
                 WHERE id = ?
                 """,
-                (request_id, remote_task_id, raw_response, utc_now_iso(), task_id),
+                (request_id, remote_task_id, raw_response, local_now_iso(), task_id),
             )
 
     def request_cancel(self, task_id: int) -> str:
-        now = utc_now_iso()
+        now = local_now_iso()
         with self.connection() as connection:
             row = connection.execute(
                 "SELECT status FROM tasks WHERE id = ?", (task_id,)
@@ -503,7 +503,7 @@ class Database:
                     image.width,
                     image.height,
                     remote_url,
-                    utc_now_iso(),
+                    local_now_iso(),
                 ),
             )
             return int(cursor.lastrowid)

@@ -1664,12 +1664,14 @@ class BatchDressPage(QWidget):
 
         count = self.count_spin.value()
         maximum = len(self.pairs) * count
+        concurrency = self.app_settings.queue_concurrency()
         answer = QMessageBox.question(
             self,
             "确认批量生成",
             f"将创建 {len(self.pairs)} 个排队任务，每对最多生成 {count} 张，"
             f"本批最多 {maximum} 张图片。\n"
-            "任务会串行执行并可能产生费用，失败后不会自动重试。\n"
+            f"任务会并发执行，同时最多 {concurrency} 个，并可能产生费用，"
+            "失败后不会自动重试。\n"
             "确定加入队列吗？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,

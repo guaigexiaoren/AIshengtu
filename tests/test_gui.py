@@ -146,12 +146,27 @@ class GuiFlowTests(unittest.TestCase):
         dialog.auto_strategy_combo.setCurrentIndex(
             dialog.auto_strategy_combo.findData("value")
         )
+        self.assertEqual(dialog.concurrency_spin.minimum(), 1)
+        self.assertEqual(dialog.concurrency_spin.maximum(), 10)
+        dialog.concurrency_spin.setValue(10)
         with patch("yixin.ui.dialogs.QMessageBox.information"):
             dialog._save()
         self.assertEqual(
             AppSettings(self.database).auto_strategy(),
             "value",
         )
+        self.assertEqual(
+            AppSettings(self.database).queue_concurrency(),
+            10,
+        )
+
+    def test_queue_concurrency_setting_applies_immediately(self) -> None:
+        settings = AppSettings(self.database)
+        settings.set_queue_concurrency(10)
+        self.window._apply_queue_settings()
+        self.assertEqual(self.worker.concurrency, 10)
+        self.assertIn("最多同时执行 10 个任务", self.window.statusBar().currentMessage())
+        self.assertIn("最多同时执行 10 个任务", self.window.create_page.queue_hint.text())
 
     def test_history_displays_auto_model_decision(self) -> None:
         page = self.window.create_page
@@ -166,6 +181,31 @@ class GuiFlowTests(unittest.TestCase):
         self.assertIn("Nano Banana Pro", text)
         self.assertIn("自动策略：质量优先", text)
         self.assertIn("判断：", text)
+
+    def test_history_displays_new_task_local_timestamp(self) -> None:
+        fixed_time = "2026-10-27T11:03:00+08:00"
+        request = ImageRequest(
+            model="gemini-3.1-flash-image",
+            prompt="本地时间测试",
+            n=1,
+            aspect_ratio="3:4",
+            resolution="2K",
+            mode="text",
+        )
+        with patch("yixin.database.local_now_iso", return_value=fixed_time):
+            task_id = self.database.create_task(request)
+
+        task = self.database.get_task(task_id)
+        history = self.window.history_page
+        self.assertEqual(
+            history._task_row_values(task)[1],
+            "2026-10-27 11:03",
+        )
+        history.show_task(task_id)
+        self.assertIn(
+            "创建时间 2026-10-27 11:03:00",
+            history.detail_meta.text(),
+        )
 
     def test_full_gui_task_save_and_reopen(self) -> None:
         page = self.window.create_page

@@ -30,6 +30,9 @@ AUTO_STRATEGY_LABELS = {
     AUTO_STRATEGY_VALUE: "性价比优先",
 }
 DEFAULT_AUTO_STRATEGY = AUTO_STRATEGY_QUALITY
+DEFAULT_QUEUE_CONCURRENCY = 2
+MIN_QUEUE_CONCURRENCY = 1
+MAX_QUEUE_CONCURRENCY = 10
 
 
 class AppSettings:
@@ -37,6 +40,7 @@ class AppSettings:
     FIXED_FOLDER_KEY = "local_save_fixed_folder"
     LAST_FOLDER_KEY = "local_save_last_folder"
     AUTO_STRATEGY_KEY = "auto_model_strategy"
+    QUEUE_CONCURRENCY_KEY = "queue_concurrency"
 
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -79,6 +83,24 @@ class AppSettings:
         if strategy not in AUTO_STRATEGIES:
             raise ValueError("不支持的自动模型策略")
         self.database.set_setting(self.AUTO_STRATEGY_KEY, strategy)
+
+    def queue_concurrency(self) -> int:
+        value = self.database.get_setting(
+            self.QUEUE_CONCURRENCY_KEY,
+            str(DEFAULT_QUEUE_CONCURRENCY),
+        )
+        try:
+            concurrency = int(value)
+        except (TypeError, ValueError):
+            return DEFAULT_QUEUE_CONCURRENCY
+        if not MIN_QUEUE_CONCURRENCY <= concurrency <= MAX_QUEUE_CONCURRENCY:
+            return DEFAULT_QUEUE_CONCURRENCY
+        return concurrency
+
+    def set_queue_concurrency(self, concurrency: int) -> None:
+        if not MIN_QUEUE_CONCURRENCY <= int(concurrency) <= MAX_QUEUE_CONCURRENCY:
+            raise ValueError("同时执行任务数应为 1–10")
+        self.database.set_setting(self.QUEUE_CONCURRENCY_KEY, str(int(concurrency)))
 
     def input_folder(self, scope: str) -> Path | None:
         key = INPUT_FOLDER_KEYS.get(scope)

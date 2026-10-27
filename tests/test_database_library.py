@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 from yixin.constants import (
@@ -101,6 +102,44 @@ class DatabaseLibraryTests(unittest.TestCase):
         interrupted = self.database.get_task(interrupted_id)
         self.assertEqual(interrupted["status"], TASK_FAILED)
         self.assertIn("意外退出", interrupted["error_message"])
+
+    def test_task_timestamps_use_local_timezone(self) -> None:
+        before = datetime.now().astimezone()
+        task_id = self.database.create_task(self._request())
+        queued = self.database.get_task(task_id)
+        created = datetime.fromisoformat(queued["created_at"])
+
+        self.assertIsNotNone(created.utcoffset())
+        self.assertEqual(created.utcoffset(), before.utcoffset())
+        self.assertLess(abs((created - before).total_seconds()), 5)
+        self.assertEqual(queued["updated_at"], queued["created_at"])
+
+        claimed = self.database.claim_next_queued()
+        started = datetime.fromisoformat(claimed["started_at"])
+        image = self.store.store_generated(task_id, png_bytes((10, 20, 30)), 0)
+        self.database.add_task_result(
+            task_id,
+            0,
+            image,
+            thumbnail_path=None,
+            remote_url=None,
+        )
+        result = self.database.get_task_results(task_id)[0]
+        result_created = datetime.fromisoformat(result["created_at"])
+
+        self.assertEqual(started.utcoffset(), before.utcoffset())
+        self.assertEqual(result_created.utcoffset(), before.utcoffset())
+        self.assertGreaterEqual(started, created)
+        self.assertGreaterEqual(result_created, started)
+
+        self.database.transition_task(task_id, TASK_SUCCESS)
+        finished_task = self.database.get_task(task_id)
+        finished = datetime.fromisoformat(finished_task["finished_at"])
+        after = datetime.now().astimezone()
+
+        self.assertEqual(finished.utcoffset(), before.utcoffset())
+        self.assertGreaterEqual(finished, result_created)
+        self.assertLessEqual(finished, after)
 
     def test_queued_task_can_be_cancelled(self) -> None:
         reference = self._reference()
@@ -276,13 +315,22 @@ class DatabaseLibraryTests(unittest.TestCase):
         settings = AppSettings(self.database)
         self.assertEqual(settings.local_save_mode(), "ask")
         self.assertEqual(settings.auto_strategy(), AUTO_STRATEGY_QUALITY)
+        self.assertEqual(settings.queue_concurrency(), 2)
         settings.set_local_save_mode("fixed")
         settings.set_auto_strategy(AUTO_STRATEGY_VALUE)
+        settings.set_queue_concurrency(1)
+        self.assertEqual(settings.queue_concurrency(), 1)
+        settings.set_queue_concurrency(10)
+        with self.assertRaises(ValueError):
+            settings.set_queue_concurrency(0)
+        with self.assertRaises(ValueError):
+            settings.set_queue_concurrency(11)
         settings.set_fixed_folder(Path(self.temp.name) / "fixed")
         settings.set_last_folder(Path(self.temp.name) / "last")
         reopened = AppSettings(Database(self.paths.database))
         self.assertEqual(reopened.local_save_mode(), "fixed")
         self.assertEqual(reopened.auto_strategy(), AUTO_STRATEGY_VALUE)
+        self.assertEqual(reopened.queue_concurrency(), 10)
         self.assertEqual(reopened.fixed_folder(), Path(self.temp.name) / "fixed")
         self.assertEqual(reopened.last_folder(), Path(self.temp.name) / "last")
 

@@ -1171,15 +1171,17 @@ class BatchDressTests(unittest.TestCase):
         self.page.aspect_combo.setCurrentText("16:9")
         self.page.resolution_combo.setCurrentText("4K")
         self.page.count_spin.setValue(2)
+        AppSettings(self.database).set_queue_concurrency(10)
         emitted: list[int] = []
         self.page.tasks_enqueued.connect(emitted.append)
 
         with patch(
             "yixin.ui.batch_dress_page.QMessageBox.question",
             return_value=QMessageBox.StandardButton.Yes,
-        ), patch("yixin.ui.batch_dress_page.QMessageBox.information"):
+        ) as question, patch("yixin.ui.batch_dress_page.QMessageBox.information"):
             self.page._enqueue_all()
 
+        self.assertIn("同时最多 10 个", question.call_args.args[2])
         tasks = list(reversed(self.database.list_tasks()))
         self.assertEqual(len(tasks), 2)
         self.assertEqual(emitted, [2])

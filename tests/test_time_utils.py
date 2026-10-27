@@ -25,6 +25,13 @@ class TimeUtilsTests(unittest.TestCase):
         now = datetime(2026, 1, 1, 10, 0, 35, tzinfo=timezone.utc)
         self.assertEqual(format_task_elapsed(running, now=now), "35秒")
 
+    def test_elapsed_supports_mixed_utc_and_local_timestamps(self) -> None:
+        completed = {
+            "created_at": "2026-01-01T10:00:00+00:00",
+            "finished_at": "2026-01-01T18:05:12+08:00",
+        }
+        self.assertEqual(format_task_elapsed(completed), "5分12秒")
+
     def test_invalid_timestamp_is_unknown(self) -> None:
         self.assertEqual(format_task_elapsed({"created_at": None}), "—")
         self.assertEqual(format_task_elapsed({"created_at": "invalid"}), "—")

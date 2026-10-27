@@ -14,6 +14,7 @@ from .library import LibraryService
 from .logging_utils import register_sensitive_value, setup_logging
 from .paths import AppPaths, resource_path
 from .security import SecretStore
+from .settings import AppSettings
 from .storage import FileStore
 from .ui.main_window import MainWindow
 from .ui.theme import APP_STYLESHEET
@@ -59,7 +60,12 @@ def run() -> int:
         secret_store = SecretStore(paths.api_key_file)
         register_sensitive_value(secret_store.load())
         client = NanoBananaClient(lambda: secret_store.load())
-        worker = TaskWorker(database, client, file_store)
+        worker = TaskWorker(
+            database,
+            client,
+            file_store,
+            concurrency=AppSettings(database).queue_concurrency(),
+        )
         library_service = LibraryService(database, file_store, paths)
         window = MainWindow(
             paths=paths,

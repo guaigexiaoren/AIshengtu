@@ -12,6 +12,11 @@ from .constants import TASK_CANCELLED, TASK_FAILED, TASK_SUCCESS
 from .database import Database, StateTransitionError
 from .logging_utils import sanitize_text
 from .models import ApiError, ConfigurationError, ImageRequest
+from .settings import (
+    DEFAULT_QUEUE_CONCURRENCY,
+    MAX_QUEUE_CONCURRENCY,
+    MIN_QUEUE_CONCURRENCY,
+)
 from .storage import FileStore
 
 
@@ -28,6 +33,7 @@ class TaskWorker:
         file_store: FileStore,
         *,
         signals: WorkerSignals | None = None,
+        concurrency: int = DEFAULT_QUEUE_CONCURRENCY,
     ) -> None:
         self.database = database
         self.client = client
@@ -36,31 +42,72 @@ class TaskWorker:
         self.logger = logging.getLogger("yixin.worker")
         self._wake = threading.Event()
         self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._state_lock = threading.Lock()
+        self._threads: dict[int, threading.Thread] = {}
+        self._concurrency = self._normalize_concurrency(concurrency)
+        self._started = False
+
+    @staticmethod
+    def _normalize_concurrency(value: int) -> int:
+        return max(MIN_QUEUE_CONCURRENCY, min(MAX_QUEUE_CONCURRENCY, int(value)))
+
+    @property
+    def concurrency(self) -> int:
+        with self._state_lock:
+            return self._concurrency
 
     def start(self) -> None:
-        if self._thread and self._thread.is_alive():
-            return
-        self._thread = threading.Thread(
-            target=self._run,
-            name="generation-queue",
-            daemon=True,
-        )
-        self._thread.start()
+        with self._state_lock:
+            self._started = True
+            self._stop.clear()
+            self._ensure_workers_locked()
         self.notify()
 
     def notify(self) -> None:
         self._wake.set()
 
-    def shutdown(self) -> None:
-        self._stop.set()
+    def set_concurrency(self, value: int) -> None:
+        concurrency = self._normalize_concurrency(value)
+        with self._state_lock:
+            self._concurrency = concurrency
+            if self._started and not self._stop.is_set():
+                self._ensure_workers_locked()
+        self.notify()
+
+    def shutdown(self, *, wait: bool = False, timeout: float = 5.0) -> None:
+        with self._state_lock:
+            self._started = False
+            self._stop.set()
         self._wake.set()
+        if not wait:
+            return
+        with self._state_lock:
+            threads = tuple(self._threads.values())
+        for thread in threads:
+            thread.join(timeout=max(0.0, timeout))
 
     def request_cancel(self, task_id: int) -> str:
         return self.database.request_cancel(task_id)
 
-    def _run(self) -> None:
+    def _ensure_workers_locked(self) -> None:
+        for index in range(self._concurrency):
+            thread = self._threads.get(index)
+            if thread and thread.is_alive():
+                continue
+            thread = threading.Thread(
+                target=self._run,
+                args=(index,),
+                name=f"generation-queue-{index + 1}",
+                daemon=True,
+            )
+            self._threads[index] = thread
+            thread.start()
+
+    def _run(self, worker_index: int) -> None:
         while not self._stop.is_set():
+            with self._state_lock:
+                if worker_index >= self._concurrency:
+                    break
             try:
                 task = self.database.claim_next_queued()
             except Exception:
@@ -74,6 +121,10 @@ class TaskWorker:
                 self._wake.clear()
                 continue
             self.process_task(dict(task))
+        with self._state_lock:
+            current = self._threads.get(worker_index)
+            if current is threading.current_thread():
+                self._threads.pop(worker_index, None)
 
     def process_task(self, task: dict) -> None:
         task_id = int(task["id"])

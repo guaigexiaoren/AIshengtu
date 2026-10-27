@@ -23,6 +23,7 @@ from ..library import LibraryService
 from ..logging_utils import register_sensitive_value
 from ..paths import AppPaths
 from ..security import SecretStore
+from ..settings import AppSettings
 from ..storage import FileStore
 from ..worker import TaskWorker
 from .batch_dress_page import BatchDressPage
@@ -91,9 +92,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self.setStatusBar(QStatusBar())
-        self.statusBar().showMessage(
-            f"数据目录：{self.paths.root} · 任务串行执行，生成请求不会自动重试"
-        )
+        self._update_queue_status()
 
         self.nav_list.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.create_page.settings_requested.connect(self.open_settings)
@@ -145,8 +144,22 @@ class MainWindow(QMainWindow):
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self.secret_store, self.database, self)
+        dialog.settings_saved.connect(self._apply_queue_settings)
         dialog.exec()
         register_sensitive_value(self.secret_store.load())
+
+    def _apply_queue_settings(self) -> None:
+        self.worker.set_concurrency(
+            AppSettings(self.database).queue_concurrency()
+        )
+        self._update_queue_status()
+        self.create_page.refresh_queue()
+
+    def _update_queue_status(self) -> None:
+        self.statusBar().showMessage(
+            f"数据目录：{self.paths.root} · 最多同时执行 "
+            f"{self.worker.concurrency} 个任务 · 生成请求不会自动重试"
+        )
 
     def _on_task_changed(self, task_id: int, status: str) -> None:
         label = STATUS_LABELS.get(status, status)

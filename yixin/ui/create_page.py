@@ -161,7 +161,7 @@ class CreatePage(QWidget):
         header_layout = QVBoxLayout(header)
         title = QLabel("开始创作")
         title.setStyleSheet("font-size:22px;font-weight:700;color:#1f2d43;")
-        subtitle = QLabel("选择 Nano Banana 型号，输入提示词后加入串行任务队列。")
+        subtitle = QLabel("选择 Nano Banana 型号，输入提示词后加入后台任务队列。")
         subtitle.setStyleSheet("color:#6d7a91;")
         header_layout.addWidget(title)
         header_layout.addWidget(subtitle)
@@ -314,7 +314,7 @@ class CreatePage(QWidget):
         group.setMaximumHeight(280)
         layout = QVBoxLayout(group)
         top = QHBoxLayout()
-        self.queue_hint = QLabel("串行执行；失败不会自动重试，避免重复扣费。")
+        self.queue_hint = QLabel("按设置并发执行；失败不会自动重试，避免重复扣费。")
         self.queue_hint.setStyleSheet("color:#6d7a91;")
         refresh = QPushButton("刷新")
         self.cancel_button = QPushButton("取消任务")
@@ -760,10 +760,14 @@ class CreatePage(QWidget):
         self.refresh_queue()
         self.worker.notify()
         self.task_status_label.setText(f"任务 #{self.current_task_id} 已加入队列")
-        self.task_detail_label.setText("参数已保存，任务将按顺序执行。")
+        self.task_detail_label.setText("参数已保存，任务将按设置并发执行。")
         self.preview.set_placeholder("任务排队中，完成后结果会显示在这里")
 
     def refresh_queue(self) -> None:
+        self.queue_hint.setText(
+            f"最多同时执行 {self.app_settings.queue_concurrency()} 个任务；"
+            "失败不会自动重试，避免重复扣费。"
+        )
         self._updating_queue = True
         self.queue_table.blockSignals(True)
         selected_task_id = None

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -133,8 +134,10 @@ class LocalExportTests(unittest.TestCase):
         task_id, result_id, result_path = self._completed_task()
         destination = self.root / "exports"
         destination.mkdir()
-        first = self.exporter.save_result(task_id, result_id, destination)
-        second = self.exporter.save_result(task_id, result_id, destination)
+        with patch("yixin.local_export.datetime") as exported_datetime:
+            exported_datetime.now.return_value = datetime(2026, 10, 27, 18, 0, 0)
+            first = self.exporter.save_result(task_id, result_id, destination)
+            second = self.exporter.save_result(task_id, result_id, destination)
         self.assertNotEqual(first, second)
         self.assertEqual(first.read_bytes(), Path(result_path).read_bytes())
         self.assertEqual(len(list(destination.iterdir())), 2)

@@ -49,6 +49,10 @@ def utc_now_iso() -> str:
     return utc_now().isoformat(timespec="seconds")
 
 
+def local_now_iso() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
